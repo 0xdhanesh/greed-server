@@ -23,3 +23,40 @@
 | Claude Console output | Burpsuite | 
 | --------------------- | --------- | 
 | ![claude-console-output](./assets/29_10_26_proxy_history_to_repeater.png) | ![burpsuite-repeater](./assets/29_10_26_proxy_history_to_repeater1.png) | 
+
+**feat(tools): add proxy history notes** 
+
+- Notes can be added to a Proxy history item using its official Montoya history ID.
+- New notes are appended by default, preserving existing notes on separate lines.
+- Existing notes can be replaced only when append is explicitly set to false.
+- Blank notes are rejected without modifying the history item.
+- Unknown history IDs return a clear error without modifying another item.
+- Tool results and logs do not expose note contents or HTTP data.
+- Updating notes does not transmit an HTTP request or open Repeater or Intruder.
+- Notes can be added to a Proxy history item using its official Montoya history ID.
+- New notes are appended by default, preserving existing notes on separate lines.
+- Existing notes can be replaced only when append is explicitly set to false.
+- Blank notes are rejected without modifying the history item.
+- Unknown history IDs return a clear error without modifying another item.
+- Tool results and logs do not expose note contents or HTTP data.
+- Updating notes does not transmit an HTTP request or open Repeater or Intruder.
+
+| Claude Console output | Burpsuite | 
+| --------------------- | --------- | 
+| ![claude-console-output](./assets/29_10_26_proxy_history_notes.png) | ![burpsuite-repeater](./assets/29_10_26_proxy_history_notes1.png) | 
+
+**feat(tools): add proxy history highlighting**
+
+- A Proxy history item can be highlighted using its official Montoya history ID.
+- Highlight colors are validated against the official Montoya `HighlightColor` enum.
+- Color names are accepted case-insensitively.
+- `NONE` clears the existing highlight.
+- Invalid colors are rejected without changing the current highlight.
+- Unknown history IDs return a clear error without modifying another item.
+- Proxy history summaries report the current highlight color.
+- Tool results and logs do not expose HTTP contents, notes, cookies or authorization data.
+- Updating a highlight does not transmit an HTTP request or open Repeater or Intruder.
+
+| Claude Console output | Burp Suite Proxy history |
+| --------------------- | ------------------------ |
+| ![Claude highlight validation](./assets/29_10_26_set_proxy_history_highlight.png) | ![Highlighted Proxy history item](./assets/29_10_26_set_proxy_history_highlight1.png) |

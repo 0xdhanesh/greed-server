@@ -33,4 +33,7 @@
 | `get_proxy_http_history_item` | Read one history item by Montoya history ID | ❌ | ✅ | Lookup by `ProxyHttpRequestResponse.id()` and existing serializer | ✅ |
 | `send_proxy_history_to_repeater` | Open a Proxy history request in Repeater without sending it | ❌ | ✅ | Lookup by Montoya history ID; prefer `finalRequest()`, fall back to `request()`, then call Montoya Repeater API | ✅ |
 | `set_proxy_history_notes` | Append or replace notes on one Proxy history item | ❌ | ✅ | Lookup by Montoya history ID and update Montoya annotations; append defaults to true | ✅ |
+| `set_proxy_history_highlight` | Set or clear one Proxy history item’s highlight using `historyId` and `color` | ❌ | ✅ | Lookup by Montoya history ID and update annotations using the Montoya `HighlightColor` enum | ✅ |
+
+`set_proxy_history_highlight` changes exactly one item and never transmits an HTTP request. Accepted colors are `NONE`, `RED`, `ORANGE`, `YELLOW`, `GREEN`, `CYAN`, `BLUE`, `PINK`, `MAGENTA`, and `GRAY` (case-insensitive; surrounding whitespace is ignored). `NONE` clears the highlight. The history summary reports the enum name, or `null` when no highlight is set. Automated tests pass; live Burp verification is pending.
 
