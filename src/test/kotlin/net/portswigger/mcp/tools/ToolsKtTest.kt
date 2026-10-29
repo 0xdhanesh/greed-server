@@ -748,6 +748,7 @@ class ToolsKtTest {
             every { request.url() } returns url
             every { item.id() } returns id
             every { item.time() } returns ZonedDateTime.parse("2026-10-29T10:00:00Z")
+            every { item.finalRequest() } returns null
             every { item.request() } returns request
             every { item.edited() } returns false
             every { item.annotations() } returns mockk {
@@ -874,6 +875,145 @@ class ToolsKtTest {
                 assertEquals("No Proxy HTTP history item found with ID 999", client.callTool(
                     "get_proxy_http_history_item", mapOf("historyId" to 999)
                 ).expectTextContent())
+            }
+        }
+
+        @Test
+        fun `send proxy history to repeater uses official ID and prefers final request`() {
+            val proxy = mockk<Proxy>()
+            val repeater = mockk<burp.api.montoya.repeater.Repeater>(relaxed = true)
+            val first = historyItem(12, "https://first.test/first")
+            val selected = historyItem(9876, "https://example.test/original")
+            val finalRequest = mockk<HttpRequest>()
+            val service = mockk<burp.api.montoya.http.HttpService>()
+            every { finalRequest.method() } returns "POST"
+            every { finalRequest.url() } returns "https://example.test/final?token=SECRET"
+            every { finalRequest.path() } returns "/final"
+            every { finalRequest.httpService() } returns service
+            every { service.host() } returns "example.test"
+            every { finalRequest.toString() } returns "Authorization: secret\r\nCookie: secret\r\n\r\nBODY_SECRET"
+            every { selected.finalRequest() } returns finalRequest
+            every { api.proxy() } returns proxy
+            every { api.repeater() } returns repeater
+            every { proxy.history() } returns listOf(first, selected)
+
+            runBlocking {
+                val text = client.callTool("send_proxy_history_to_repeater", mapOf(
+                    "historyId" to 9876,
+                    "tabName" to "History acceptance test"
+                )).expectTextContent()
+
+                assertTrue(text.contains("9876"))
+                assertTrue(text.contains("POST example.test/final"))
+                assertTrue(text.contains("History acceptance test"))
+                assertTrue(text.contains("Request was not sent"))
+                assertFalse(text.contains("Authorization"))
+                assertFalse(text.contains("Cookie"))
+                assertFalse(text.contains("SECRET"))
+                assertFalse(text.contains("BODY_SECRET"))
+                verify(exactly = 1) { selected.id() }
+                verify(exactly = 1) { selected.finalRequest() }
+                verify(exactly = 0) { selected.request() }
+                verify(exactly = 1) { repeater.sendToRepeater(finalRequest, "History acceptance test") }
+                verify(exactly = 0) { api.http() }
+            }
+        }
+
+        @Test
+        fun `send proxy history to repeater falls back and chooses deterministic name`() {
+            val proxy = mockk<Proxy>()
+            val repeater = mockk<burp.api.montoya.repeater.Repeater>(relaxed = true)
+            val item = historyItem(51, "https://example.test/path")
+            val request = mockk<HttpRequest>()
+            val service = mockk<burp.api.montoya.http.HttpService>()
+            every { item.request() } returns request
+            every { request.method() } returns "GET"
+            every { request.url() } returns "https://example.test/path"
+            every { request.path() } returns "/path"
+            every { request.httpService() } returns service
+            every { service.host() } returns "example.test"
+            every { api.proxy() } returns proxy
+            every { api.repeater() } returns repeater
+            every { proxy.history() } returns listOf(item)
+
+            runBlocking {
+                val text = client.callTool("send_proxy_history_to_repeater", mapOf(
+                    "historyId" to 51, "tabName" to "  "
+                )).expectTextContent()
+                assertTrue(text.contains("History 51"))
+                verify(exactly = 1) { item.finalRequest() }
+                verify(exactly = 1) { item.request() }
+                verify(exactly = 1) { repeater.sendToRepeater(request, "History 51") }
+            }
+        }
+
+        @Test
+        fun `send proxy history to repeater handles omitted tab name`() {
+            val proxy = mockk<Proxy>()
+            val repeater = mockk<burp.api.montoya.repeater.Repeater>(relaxed = true)
+            val item = historyItem(52, "https://example.test/path")
+            val request = mockk<HttpRequest>()
+            val service = mockk<burp.api.montoya.http.HttpService>()
+            every { item.request() } returns request
+            every { request.method() } returns "GET"
+            every { request.path() } returns "/path"
+            every { request.httpService() } returns service
+            every { service.host() } returns "example.test"
+            every { api.proxy() } returns proxy
+            every { api.repeater() } returns repeater
+            every { proxy.history() } returns listOf(item)
+
+            runBlocking {
+                val text = client.callTool("send_proxy_history_to_repeater", mapOf("historyId" to 52))
+                    .expectTextContent()
+                assertTrue(text.contains("History 52"))
+                verify(exactly = 1) { repeater.sendToRepeater(request, "History 52") }
+                verify(exactly = 0) { api.http() }
+            }
+        }
+
+        @Test
+        fun `send proxy history to repeater rejects unknown ID and missing request`() {
+            val proxy = mockk<Proxy>()
+            val repeater = mockk<burp.api.montoya.repeater.Repeater>(relaxed = true)
+            val item = mockk<ProxyHttpRequestResponse>()
+            every { item.id() } returns 8
+            every { item.finalRequest() } returns null
+            every { item.request() } returns null
+            every { api.proxy() } returns proxy
+            every { api.repeater() } returns repeater
+            every { proxy.history() } returns listOf(item)
+
+            runBlocking {
+                assertTrue(client.callTool("send_proxy_history_to_repeater", mapOf(
+                    "historyId" to 9
+                )).expectTextContent().contains("No Proxy HTTP history item found"))
+                assertTrue(client.callTool("send_proxy_history_to_repeater", mapOf(
+                    "historyId" to 8
+                )).expectTextContent().contains("has no request"))
+                verify(exactly = 0) { repeater.sendToRepeater(any<HttpRequest>(), any<String>()) }
+                verify(exactly = 0) { api.http() }
+            }
+        }
+
+        @Test
+        fun `send proxy history to repeater respects denied access`() {
+            val previousHandler = DataAccessSecurity.approvalHandler
+            val denyingHandler = mockk<DataAccessApprovalHandler>()
+            DataAccessSecurity.approvalHandler = denyingHandler
+            dataAccessApprovalRequired = true
+            coEvery { denyingHandler.requestDataAccess(DataAccessType.HTTP_HISTORY, config) } returns false
+            try {
+                runBlocking {
+                    assertEquals("HTTP history access denied by Burp Suite", client.callTool(
+                        "send_proxy_history_to_repeater", mapOf("historyId" to 7)
+                    ).expectTextContent())
+                    verify(exactly = 0) { api.repeater() }
+                    verify(exactly = 0) { api.http() }
+                }
+            } finally {
+                dataAccessApprovalRequired = false
+                DataAccessSecurity.approvalHandler = previousHandler
             }
         }
 
