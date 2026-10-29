@@ -9,6 +9,7 @@ import burp.api.montoya.http.HttpMode
 import burp.api.montoya.http.HttpService
 import burp.api.montoya.core.HighlightColor
 import burp.api.montoya.http.message.HttpHeader
+import burp.api.montoya.http.message.HttpRequestResponse as MontoyaHttpRequestResponse
 import burp.api.montoya.http.message.requests.HttpRequest
 import burp.api.montoya.proxy.ProxyHttpRequestResponse
 import io.modelcontextprotocol.kotlin.sdk.server.Server
@@ -428,6 +429,39 @@ fun Server.registerTools(api: MontoyaApi, config: McpConfig) {
         "Highlight $result on Proxy history item $historyId"
     }
 
+    mcpTool<SendProxyHistoryToOrganizer>(
+        "Saves one Proxy HTTP history item to Burp Organizer using its Montoya history ID. The final processed request is preferred, and the recorded response and annotations are preserved when available. No HTTP request is transmitted."
+    ) {
+        val historyAllowed = checkDataAccessOrDeny(DataAccessType.HTTP_HISTORY, config, api, "HTTP history")
+        if (!historyAllowed) {
+            return@mcpTool "HTTP history access denied by Burp Suite"
+        }
+
+        val organizerAllowed = checkDataAccessOrDeny(DataAccessType.ORGANIZER, config, api, "Organizer")
+        if (!organizerAllowed) {
+            return@mcpTool "Organizer access denied by Burp Suite"
+        }
+
+        val item = findProxyHistoryItem(api, historyId)
+            ?: return@mcpTool "No Proxy HTTP history item found with ID $historyId"
+        val request = item.finalRequest() ?: item.request()
+            ?: return@mcpTool "Proxy HTTP history item $historyId has no request to add to Organizer"
+        val response = item.response()
+        val annotationsPreserved = response != null
+
+        if (response != null) {
+            val requestResponse = MontoyaHttpRequestResponse.httpRequestResponse(request, response, item.annotations())
+            api.organizer().sendToOrganizer(requestResponse)
+        } else {
+            api.organizer().sendToOrganizer(request)
+        }
+
+        api.logging().logToOutput(
+            "Added Proxy history item $historyId to Organizer (response included: ${response != null}, annotations preserved: $annotationsPreserved)"
+        )
+        "Organizer item created from Proxy history ID $historyId (response included: ${response != null}, annotations preserved: $annotationsPreserved). No HTTP request was transmitted."
+    }
+
     mcpPaginatedTool<GetOrganizerItems>("Displays items within the Organizer tab") {
         val allowed = checkDataAccessOrDeny(DataAccessType.ORGANIZER, config, api, "Organizer")
         if (!allowed) {
@@ -629,6 +663,9 @@ data class SetProxyHistoryNotes(val historyId: Int, val notes: String, val appen
 
 @Serializable
 data class SetProxyHistoryHighlight(val historyId: Int, val color: String)
+
+@Serializable
+data class SendProxyHistoryToOrganizer(val historyId: Int)
 
 @Serializable
 data class ProxyHttpHistorySummary(

@@ -34,4 +34,4 @@
 | `send_proxy_history_to_repeater` | Open a Proxy history request in Repeater without sending it | ❌ | ✅ | Lookup by Montoya history ID; prefer `finalRequest()`, fall back to `request()`, then call Montoya Repeater API | ✅ |
 | `set_proxy_history_notes` | Append or replace notes on one Proxy history item | ❌ | ✅ | Lookup by Montoya history ID and update Montoya annotations; append defaults to true | ✅ |
 | `set_proxy_history_highlight` | Set or clear one Proxy history item’s highlight using `historyId` and `color` [ `NONE`, `RED`, `ORANGE`, `YELLOW`, `GREEN`, `CYAN`, `BLUE`, `PINK`, `MAGENTA`, and `GRAY`] | ❌ | ✅ | Lookup by Montoya history ID and update annotations using the Montoya `HighlightColor` enum | ✅ |
-
+| `send_proxy_history_to_organizer` | Save one Proxy history item to Organizer without transmitting it | ❌ | ✅ | Find by Montoya history ID, prefer `finalRequest()`, and preserve response and annotations when available | ✅ |
