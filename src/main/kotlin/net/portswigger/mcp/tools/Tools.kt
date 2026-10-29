@@ -384,6 +384,26 @@ fun Server.registerTools(api: MontoyaApi, config: McpConfig) {
         "Opened Proxy history item $historyId (${request.method()} ${request.httpService().host()}${request.path()}) in Repeater tab '$resolvedTabName'. Request was not sent."
     }
 
+    mcpTool<SendProxyHistoryToIntruder>(
+        "Opens an existing Proxy HTTP history request in Burp Intruder using its official Montoya history ID. The final processed request is preferred. The tool does not start an Intruder attack or transmit the request."
+    ) {
+        val allowed = checkDataAccessOrDeny(DataAccessType.HTTP_HISTORY, config, api, "HTTP history")
+        if (!allowed) {
+            return@mcpTool "HTTP history access denied by Burp Suite"
+        }
+
+        val item = findProxyHistoryItem(api, historyId)
+            ?: return@mcpTool "No Proxy HTTP history item found with ID $historyId"
+        val request = item.finalRequest() ?: item.request()
+            ?: return@mcpTool "Proxy HTTP history item $historyId has no request to open in Intruder"
+        val resolvedTabName = tabName?.takeIf { it.isNotBlank() } ?: "History $historyId"
+
+        api.intruder().sendToIntruder(request, resolvedTabName)
+        api.logging().logToOutput("Opened Proxy history item $historyId in Intruder; attack not started and request not sent")
+
+        "Opened Proxy history item $historyId in Intruder tab '$resolvedTabName'. No Intruder attack was started and no HTTP request was transmitted."
+    }
+
     mcpTool<SetProxyHistoryNotes>(
         "Appends or replaces notes on one Proxy HTTP history item selected by its Montoya history ID. Appending is the default to preserve existing notes."
     ) {
@@ -729,6 +749,9 @@ data class GetProxyHttpHistoryItem(val historyId: Int)
 
 @Serializable
 data class SendProxyHistoryToRepeater(val historyId: Int, val tabName: String? = null)
+
+@Serializable
+data class SendProxyHistoryToIntruder(val historyId: Int, val tabName: String? = null)
 
 @Serializable
 data class SetProxyHistoryNotes(val historyId: Int, val notes: String, val append: Boolean = true)

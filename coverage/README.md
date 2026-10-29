@@ -113,3 +113,22 @@
 | Claude Console output | Burp Suite Repeater |
 | --------------------- | ------------------- |
 | ![Claude Organizer Repeater validation](./assets/30_10_26_send_organizer_item_to_repeater.png) | ![Organizer request opened in Repeater](./assets/30_10_26_send_organizer_item_to_repeater1.png) |
+
+**feat(tools): open Proxy history requests in Intruder**
+
+- A Proxy history request can be opened in Burp Intruder using its official Montoya history ID.
+- HTTP-history access approval is required before an item is read or opened.
+- The final processed request is preferred, with the original request used as a fallback.
+- The request is transferred directly through Montoya without serialization or reconstruction.
+- Explicit Intruder tab names are supported and passed unchanged.
+- Omitted or blank tab names use the default `History <historyId>` format.
+- Unknown history IDs return a clear error without creating an Intruder tab.
+- Missing requests return a controlled error without opening Intruder.
+- Tool results and logs do not expose HTTP contents, notes, cookies, tokens or authorization data.
+- Opening the request in Intruder does not transmit the HTTP request.
+- Opening the request does not configure payloads or start an Intruder attack.
+- Proxy history remains unchanged and no Repeater or Organizer side effects are created.
+
+| Claude Console output | Burp Suite Intruder |
+| --------------------- | ------------------- |
+| ![Claude Proxy history Intruder validation](./assets/30_10_26_send_proxy_history_to_intruder.png) | ![Proxy history request opened in Intruder](./assets/30_10_26_send_proxy_history_to_intruder1.png) |
