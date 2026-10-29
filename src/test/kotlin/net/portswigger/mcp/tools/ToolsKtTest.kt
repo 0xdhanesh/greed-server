@@ -11,7 +11,10 @@ import burp.api.montoya.http.Http
 import burp.api.montoya.http.HttpMode
 import burp.api.montoya.http.HttpProtocol
 import burp.api.montoya.http.message.HttpHeader
+import burp.api.montoya.http.message.HttpRequestResponse as MontoyaHttpRequestResponse
 import burp.api.montoya.http.message.requests.HttpRequest
+import burp.api.montoya.http.message.responses.HttpResponse
+import burp.api.montoya.organizer.Organizer
 import burp.api.montoya.logging.Logging
 import burp.api.montoya.persistence.PersistedObject
 import burp.api.montoya.proxy.Proxy
@@ -747,7 +750,8 @@ class ToolsKtTest {
             url: String,
             body: String = "secret-request-body",
             initialNotes: String = "test note",
-            initialHighlight: HighlightColor? = null
+            initialHighlight: HighlightColor? = null,
+            initialResponse: HttpResponse? = null
         ): ProxyHttpRequestResponse {
             mockkStatic("net.portswigger.mcp.schema.SerializationKt")
             val item = mockk<ProxyHttpRequestResponse>()
@@ -772,7 +776,7 @@ class ToolsKtTest {
                 highlightValue = firstArg<HighlightColor>().takeUnless { it == HighlightColor.NONE }
             }
             every { item.annotations() } returns annotations
-            every { item.response() } returns null
+            every { item.response() } returns initialResponse
             every { item.contains(any<java.util.regex.Pattern>()) } answers {
                 firstArg<java.util.regex.Pattern>().matcher(url).find()
             }
@@ -1305,6 +1309,190 @@ class ToolsKtTest {
                     assertEquals(HighlightColor.PINK, annotations.highlightColor())
                     verify(exactly = 0) { annotations.setHighlightColor(any()) }
                     verify(exactly = 0) { api.proxy() }
+                    verify(exactly = 0) { api.http() }
+                    verify(exactly = 0) { api.repeater() }
+                    verify(exactly = 0) { api.intruder() }
+                }
+            } finally {
+                dataAccessApprovalRequired = false
+                DataAccessSecurity.approvalHandler = previousHandler
+            }
+        }
+
+        @Test
+        fun `send proxy history to organizer wraps final request response and annotations`() {
+            val previousHandler = DataAccessSecurity.approvalHandler
+            val approvalHandler = mockk<DataAccessApprovalHandler>()
+            val proxy = mockk<Proxy>()
+            val organizer = mockk<Organizer>(relaxed = true)
+            val other = historyItem(181, "https://other.test/")
+            val response = mockk<HttpResponse>()
+            val selected = historyItem(
+                9001,
+                "https://juice-shop.test/rest/admin/application-version",
+                body = "REQUEST_BODY_SECRET",
+                initialNotes = "NOTE_SECRET",
+                initialHighlight = HighlightColor.YELLOW,
+                initialResponse = response
+            )
+            val finalRequest = mockk<HttpRequest>()
+            val annotations = selected.annotations()
+            val wrapped = mockk<MontoyaHttpRequestResponse>()
+            every { selected.finalRequest() } returns finalRequest
+            every { finalRequest.toString() } returns "Authorization: AUTH_SECRET\r\nCookie: COOKIE_SECRET"
+            every { response.toString() } returns "RESPONSE_BODY_SECRET"
+            mockkStatic(MontoyaHttpRequestResponse::class)
+            every {
+                MontoyaHttpRequestResponse.httpRequestResponse(finalRequest, response, annotations)
+            } returns wrapped
+            every { api.proxy() } returns proxy
+            every { api.organizer() } returns organizer
+            every { proxy.history() } returns listOf(other, selected)
+            DataAccessSecurity.approvalHandler = approvalHandler
+            dataAccessApprovalRequired = true
+            coEvery { approvalHandler.requestDataAccess(any(), config) } returns true
+            try {
+                runBlocking {
+                    val text = client.callTool("send_proxy_history_to_organizer", mapOf(
+                        "historyId" to 9001
+                    )).expectTextContent()
+
+                    assertTrue(text.contains("9001"), text)
+                    assertTrue(text.contains("response included: true"))
+                    assertTrue(text.contains("annotations preserved: true"))
+                    assertTrue(text.contains("No HTTP request was transmitted"))
+                    assertFalse(text.contains("AUTH_SECRET"))
+                    assertFalse(text.contains("COOKIE_SECRET"))
+                    assertFalse(text.contains("NOTE_SECRET"))
+                    assertFalse(text.contains("REQUEST_BODY_SECRET"))
+                    assertFalse(text.contains("RESPONSE_BODY_SECRET"))
+                    coVerifySequence {
+                        approvalHandler.requestDataAccess(DataAccessType.HTTP_HISTORY, config)
+                        approvalHandler.requestDataAccess(DataAccessType.ORGANIZER, config)
+                    }
+                    verify(exactly = 1) { other.id() }
+                    verify(exactly = 1) { selected.id() }
+                    verify(exactly = 1) {
+                        MontoyaHttpRequestResponse.httpRequestResponse(finalRequest, response, annotations)
+                    }
+                    verify(exactly = 1) { organizer.sendToOrganizer(wrapped) }
+                    verify(exactly = 0) { api.http() }
+                    verify(exactly = 0) { api.repeater() }
+                    verify(exactly = 0) { api.intruder() }
+                }
+            } finally {
+                dataAccessApprovalRequired = false
+                DataAccessSecurity.approvalHandler = previousHandler
+                unmockkStatic(MontoyaHttpRequestResponse::class)
+            }
+        }
+
+        @Test
+        fun `send proxy history to organizer uses request overload when response is absent`() {
+            val proxy = mockk<Proxy>()
+            val organizer = mockk<Organizer>(relaxed = true)
+            val item = historyItem(191, "https://one.test/")
+            val request = item.request()
+            every { item.finalRequest() } returns null
+            every { api.proxy() } returns proxy
+            every { api.organizer() } returns organizer
+            every { proxy.history() } returns listOf(item)
+            mockkStatic(MontoyaHttpRequestResponse::class)
+
+            runBlocking {
+                val text = client.callTool("send_proxy_history_to_organizer", mapOf(
+                    "historyId" to 191
+                )).expectTextContent()
+                assertTrue(text.contains("response included: false"))
+                assertTrue(text.contains("annotations preserved: false"))
+                assertTrue(text.contains("No HTTP request was transmitted"))
+                verify(exactly = 1) { item.finalRequest() }
+                verify(exactly = 2) { item.request() }
+                verify(exactly = 1) { organizer.sendToOrganizer(request) }
+                verify(exactly = 0) { MontoyaHttpRequestResponse.httpRequestResponse(any(), any(), any()) }
+                verify(exactly = 0) { api.http() }
+                verify(exactly = 0) { api.repeater() }
+                verify(exactly = 0) { api.intruder() }
+            }
+            unmockkStatic(MontoyaHttpRequestResponse::class)
+        }
+
+        @Test
+        fun `send proxy history to organizer unknown ID and missing request create nothing`() {
+            val proxy = mockk<Proxy>()
+            val organizer = mockk<Organizer>(relaxed = true)
+            val item = mockk<ProxyHttpRequestResponse>()
+            every { item.id() } returns 201
+            every { item.finalRequest() } returns null
+            every { item.request() } returns null
+            every { api.proxy() } returns proxy
+            every { api.organizer() } returns organizer
+            every { proxy.history() } returns listOf(item)
+
+            runBlocking {
+                assertTrue(client.callTool("send_proxy_history_to_organizer", mapOf(
+                    "historyId" to 202
+                )).expectTextContent().contains("No Proxy HTTP history item found with ID 202"))
+                assertTrue(client.callTool("send_proxy_history_to_organizer", mapOf(
+                    "historyId" to 201
+                )).expectTextContent().contains("has no request"))
+                verify(exactly = 0) { organizer.sendToOrganizer(any<HttpRequest>()) }
+                verify(exactly = 0) { organizer.sendToOrganizer(any<MontoyaHttpRequestResponse>()) }
+                verify(exactly = 0) { api.http() }
+                verify(exactly = 0) { api.repeater() }
+                verify(exactly = 0) { api.intruder() }
+            }
+        }
+
+        @Test
+        fun `send proxy history to organizer history denial prevents insertion`() {
+            val previousHandler = DataAccessSecurity.approvalHandler
+            val approvalHandler = mockk<DataAccessApprovalHandler>()
+            val organizer = mockk<Organizer>(relaxed = true)
+            DataAccessSecurity.approvalHandler = approvalHandler
+            dataAccessApprovalRequired = true
+            coEvery { approvalHandler.requestDataAccess(DataAccessType.HTTP_HISTORY, config) } returns false
+            try {
+                runBlocking {
+                    assertEquals("HTTP history access denied by Burp Suite", client.callTool(
+                        "send_proxy_history_to_organizer", mapOf("historyId" to 211)
+                    ).expectTextContent())
+                    verify(exactly = 0) { api.proxy() }
+                    verify(exactly = 0) { api.organizer() }
+                    verify(exactly = 0) { organizer.sendToOrganizer(any<HttpRequest>()) }
+                    verify(exactly = 0) { organizer.sendToOrganizer(any<MontoyaHttpRequestResponse>()) }
+                }
+            } finally {
+                dataAccessApprovalRequired = false
+                DataAccessSecurity.approvalHandler = previousHandler
+            }
+        }
+
+        @Test
+        fun `send proxy history to organizer organizer denial prevents insertion`() {
+            val previousHandler = DataAccessSecurity.approvalHandler
+            val approvalHandler = mockk<DataAccessApprovalHandler>()
+            val proxy = mockk<Proxy>()
+            val organizer = mockk<Organizer>(relaxed = true)
+            DataAccessSecurity.approvalHandler = approvalHandler
+            dataAccessApprovalRequired = true
+            coEvery { approvalHandler.requestDataAccess(DataAccessType.HTTP_HISTORY, config) } returns true
+            coEvery { approvalHandler.requestDataAccess(DataAccessType.ORGANIZER, config) } returns false
+            every { api.proxy() } returns proxy
+            every { api.organizer() } returns organizer
+            try {
+                runBlocking {
+                    assertEquals("Organizer access denied by Burp Suite", client.callTool(
+                        "send_proxy_history_to_organizer", mapOf("historyId" to 221)
+                    ).expectTextContent())
+                    coVerifySequence {
+                        approvalHandler.requestDataAccess(DataAccessType.HTTP_HISTORY, config)
+                        approvalHandler.requestDataAccess(DataAccessType.ORGANIZER, config)
+                    }
+                    verify(exactly = 0) { api.proxy() }
+                    verify(exactly = 0) { api.organizer() }
+                    verify(exactly = 0) { organizer.sendToOrganizer(any<HttpRequest>()) }
+                    verify(exactly = 0) { organizer.sendToOrganizer(any<MontoyaHttpRequestResponse>()) }
                     verify(exactly = 0) { api.http() }
                     verify(exactly = 0) { api.repeater() }
                     verify(exactly = 0) { api.intruder() }

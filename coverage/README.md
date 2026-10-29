@@ -60,3 +60,20 @@
 | Claude Console output | Burp Suite Proxy history |
 | --------------------- | ------------------------ |
 | ![Claude highlight validation](./assets/29_10_26_set_proxy_history_highlight.png) | ![Highlighted Proxy history item](./assets/29_10_26_set_proxy_history_highlight1.png) |
+
+**feat(tools): save proxy history items to Organizer**
+
+- A Proxy history item can be saved to Burp Organizer using its official Montoya history ID.
+- HTTP-history and Organizer approval are both required before an item is created.
+- The final processed request is preferred, with the original request used as a fallback.
+- Recorded responses and annotations are preserved when available.
+- Request-only items are supported without fabricating a response.
+- Unknown history IDs return a clear error without creating an Organizer item.
+- Permission denial prevents Organizer insertion.
+- Tool results and logs do not expose HTTP contents, notes, cookies, tokens or authorization data.
+- Saving an item to Organizer does not transmit an HTTP request or open Repeater or Intruder.
+- Exactly one Organizer item is created for each successful invocation.
+
+| Claude Console output | Burp Suite Organizer |
+| --------------------- | -------------------- |
+| ![Claude Organizer validation](./assets/29_10_26_send_proxy_history_to_organizer.png) | ![Proxy history item saved in Organizer](./assets/29_10_26_send_proxy_history_to_organizer1.png) |
