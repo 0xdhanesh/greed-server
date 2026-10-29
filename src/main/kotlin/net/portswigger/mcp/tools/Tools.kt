@@ -482,6 +482,54 @@ fun Server.registerTools(api: MontoyaApi, config: McpConfig) {
             .map { encodeHistoryItem(it.toSerializableForm()) }
     }
 
+    mcpPaginatedTool<GetOrganizerItemsSummary>(
+        "Returns compact summaries of Burp Organizer items, optionally filtered by regex. Results include official Organizer IDs and metadata but exclude complete requests and responses."
+    ) {
+        val allowed = checkDataAccessOrDeny(DataAccessType.ORGANIZER, config, api, "Organizer")
+        if (!allowed) {
+            return@mcpPaginatedTool sequenceOf("Organizer access denied by Burp Suite")
+        }
+
+        val compiledRegex = regex?.takeUnless { it.isBlank() }?.let(Pattern::compile)
+        val items = if (compiledRegex == null) {
+            api.organizer().items()
+        } else {
+            api.organizer().items { it.contains(compiledRegex) }
+        }
+
+        items.asSequence().map { item ->
+            val request = item.request()
+            val hasResponse = item.hasResponse()
+            val responseStatusCode = if (hasResponse) item.response()?.statusCode()?.toInt() else null
+            val annotations = item.annotations()
+            Json.encodeToString(
+                OrganizerItemSummary(
+                    organizerId = item.id(),
+                    organizerStatus = item.status().name,
+                    method = request?.method(),
+                    url = request?.url(),
+                    responseStatusCode = responseStatusCode,
+                    notes = annotations.notes(),
+                    highlightColor = if (annotations.hasHighlightColor()) annotations.highlightColor().name else null,
+                    hasResponse = hasResponse
+                )
+            )
+        }
+    }
+
+    mcpTool<GetOrganizerItem>(
+        "Returns one size-limited Burp Organizer item by its official Montoya Organizer ID. Large request or response fields may be truncated."
+    ) {
+        val allowed = checkDataAccessOrDeny(DataAccessType.ORGANIZER, config, api, "Organizer")
+        if (!allowed) {
+            return@mcpTool "Organizer access denied by Burp Suite"
+        }
+
+        val item = api.organizer().items().firstOrNull { it.id() == organizerId }
+            ?: return@mcpTool "No Organizer item found with ID $organizerId"
+        encodeHistoryItem(item.toSerializableForm())
+    }
+
     mcpPaginatedTool<GetProxyWebsocketHistory>("Displays items within the proxy WebSocket history") {
         val allowed = checkDataAccessOrDeny(DataAccessType.WEBSOCKET_HISTORY, config, api, "WebSocket history")
         if (!allowed) {
@@ -684,6 +732,28 @@ data class GetOrganizerItems(override val count: Int, override val offset: Int) 
 
 @Serializable
 data class GetOrganizerItemsRegex(val regex: String, override val count: Int, override val offset: Int) : Paginated
+
+@Serializable
+data class GetOrganizerItemsSummary(
+    override val count: Int,
+    override val offset: Int,
+    val regex: String? = null
+) : Paginated
+
+@Serializable
+data class GetOrganizerItem(val organizerId: Int)
+
+@Serializable
+data class OrganizerItemSummary(
+    val organizerId: Int,
+    val organizerStatus: String,
+    val method: String?,
+    val url: String?,
+    val responseStatusCode: Int?,
+    val notes: String,
+    val highlightColor: String?,
+    val hasResponse: Boolean
+)
 
 @Serializable
 data class GetProxyWebsocketHistory(override val count: Int, override val offset: Int) : Paginated
