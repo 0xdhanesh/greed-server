@@ -6,6 +6,7 @@ import burp.api.montoya.collaborator.*
 import burp.api.montoya.core.BurpSuiteEdition
 import burp.api.montoya.core.ByteArray
 import burp.api.montoya.core.Annotations
+import burp.api.montoya.core.HighlightColor
 import burp.api.montoya.http.Http
 import burp.api.montoya.http.HttpMode
 import burp.api.montoya.http.HttpProtocol
@@ -745,7 +746,8 @@ class ToolsKtTest {
             id: Int,
             url: String,
             body: String = "secret-request-body",
-            initialNotes: String = "test note"
+            initialNotes: String = "test note",
+            initialHighlight: HighlightColor? = null
         ): ProxyHttpRequestResponse {
             mockkStatic("net.portswigger.mcp.schema.SerializationKt")
             val item = mockk<ProxyHttpRequestResponse>()
@@ -762,6 +764,12 @@ class ToolsKtTest {
             every { annotations.notes() } answers { notesValue }
             every { annotations.setNotes(any()) } answers {
                 notesValue = firstArg()
+            }
+            var highlightValue = initialHighlight
+            every { annotations.hasHighlightColor() } answers { highlightValue != null }
+            every { annotations.highlightColor() } answers { highlightValue ?: HighlightColor.NONE }
+            every { annotations.setHighlightColor(any()) } answers {
+                highlightValue = firstArg<HighlightColor>().takeUnless { it == HighlightColor.NONE }
             }
             every { item.annotations() } returns annotations
             every { item.response() } returns null
@@ -1147,6 +1155,155 @@ class ToolsKtTest {
                     ).expectTextContent())
                     assertEquals("Preserve me", annotations.notes())
                     verify(exactly = 0) { annotations.setNotes(any()) }
+                    verify(exactly = 0) { api.proxy() }
+                    verify(exactly = 0) { api.http() }
+                    verify(exactly = 0) { api.repeater() }
+                    verify(exactly = 0) { api.intruder() }
+                }
+            } finally {
+                dataAccessApprovalRequired = false
+                DataAccessSecurity.approvalHandler = previousHandler
+            }
+        }
+
+        @Test
+        fun `set proxy history highlight accepts enum names case insensitively and trims whitespace`() {
+            val proxy = mockk<Proxy>()
+            val lower = historyItem(121, "https://one.test/")
+            val mixed = historyItem(122, "https://two.test/")
+            val spaced = historyItem(123, "https://three.test/")
+            every { api.proxy() } returns proxy
+            every { proxy.history() } returns listOf(lower, mixed, spaced)
+
+            runBlocking {
+                assertTrue(client.callTool("set_proxy_history_highlight", mapOf(
+                    "historyId" to 121, "color" to "yellow"
+                )).expectTextContent().contains("YELLOW"))
+                assertTrue(client.callTool("set_proxy_history_highlight", mapOf(
+                    "historyId" to 122, "color" to "rEd"
+                )).expectTextContent().contains("RED"))
+                assertTrue(client.callTool("set_proxy_history_highlight", mapOf(
+                    "historyId" to 123, "color" to "  oRaNgE  "
+                )).expectTextContent().contains("ORANGE"))
+
+                assertEquals(HighlightColor.YELLOW, lower.annotations().highlightColor())
+                assertEquals(HighlightColor.RED, mixed.annotations().highlightColor())
+                assertEquals(HighlightColor.ORANGE, spaced.annotations().highlightColor())
+            }
+        }
+
+        @Test
+        fun `set proxy history highlight changes only matching item and returns safe confirmation`() {
+            val proxy = mockk<Proxy>()
+            val selected = historyItem(131, "https://selected.test/", body = "BODY_SECRET", initialNotes = "NOTE_SECRET")
+            val other = historyItem(132, "https://other.test/", initialHighlight = HighlightColor.BLUE)
+            val selectedAnnotations = selected.annotations()
+            val otherAnnotations = other.annotations()
+            every { api.proxy() } returns proxy
+            every { proxy.history() } returns listOf(other, selected)
+
+            runBlocking {
+                val output = client.callTool("set_proxy_history_highlight", mapOf(
+                    "historyId" to 131, "color" to "GREEN"
+                )).expectTextContent()
+
+                assertEquals("Highlight set to GREEN on Proxy history item 131", output)
+                assertFalse(output.contains("selected.test"))
+                assertFalse(output.contains("NOTE_SECRET"))
+                assertFalse(output.contains("BODY_SECRET"))
+                assertEquals(HighlightColor.GREEN, selectedAnnotations.highlightColor())
+                assertEquals(HighlightColor.BLUE, otherAnnotations.highlightColor())
+                verify(exactly = 1) { selectedAnnotations.setHighlightColor(HighlightColor.GREEN) }
+                verify(exactly = 0) { otherAnnotations.setHighlightColor(any()) }
+                verify(exactly = 0) { api.http() }
+                verify(exactly = 0) { api.repeater() }
+                verify(exactly = 0) { api.intruder() }
+            }
+        }
+
+        @Test
+        fun `set proxy history highlight rejects invalid enum without changing highlight`() {
+            val proxy = mockk<Proxy>()
+            val item = historyItem(141, "https://one.test/", initialHighlight = HighlightColor.RED)
+            val annotations = item.annotations()
+            every { api.proxy() } returns proxy
+            every { proxy.history() } returns listOf(item)
+
+            runBlocking {
+                val result = client.callTool("set_proxy_history_highlight", mapOf(
+                    "historyId" to 141, "color" to "NOT_A_COLOR"
+                ))
+                assertTrue(result?.isError ?: false)
+                assertTrue(((result?.content?.firstOrNull() as? TextContent)?.text ?: "")
+                    .contains("Unsupported highlight color"))
+                assertEquals(HighlightColor.RED, annotations.highlightColor())
+                verify(exactly = 0) { annotations.setHighlightColor(any()) }
+            }
+        }
+
+        @Test
+        fun `set proxy history highlight NONE clears color and summary reports state`() {
+            val proxy = mockk<Proxy>()
+            val item = historyItem(151, "https://one.test/", initialHighlight = HighlightColor.YELLOW)
+            val annotations = item.annotations()
+            every { api.proxy() } returns proxy
+            every { proxy.history() } returns listOf(item)
+
+            runBlocking {
+                assertTrue(client.callTool("set_proxy_history_highlight", mapOf(
+                    "historyId" to 151, "color" to "NONE"
+                )).expectTextContent().contains("cleared"))
+                assertFalse(annotations.hasHighlightColor())
+                assertTrue(client.callTool("get_proxy_http_history_summary", mapOf(
+                    "count" to 1, "offset" to 0
+                )).expectTextContent().contains("\"highlightColor\":null"))
+
+                client.callTool("set_proxy_history_highlight", mapOf(
+                    "historyId" to 151, "color" to "yellow"
+                ))
+                assertTrue(client.callTool("get_proxy_http_history_summary", mapOf(
+                    "count" to 1, "offset" to 0
+                )).expectTextContent().contains("\"highlightColor\":\"YELLOW\""))
+                verify(exactly = 1) { annotations.setHighlightColor(HighlightColor.NONE) }
+            }
+        }
+
+        @Test
+        fun `set proxy history highlight unknown ID does not modify any item`() {
+            val proxy = mockk<Proxy>()
+            val item = historyItem(161, "https://one.test/", initialHighlight = HighlightColor.CYAN)
+            val annotations = item.annotations()
+            every { api.proxy() } returns proxy
+            every { proxy.history() } returns listOf(item)
+
+            runBlocking {
+                assertTrue(client.callTool("set_proxy_history_highlight", mapOf(
+                    "historyId" to 999, "color" to "RED"
+                )).expectTextContent().contains("No Proxy HTTP history item found with ID 999"))
+                assertEquals(HighlightColor.CYAN, annotations.highlightColor())
+                verify(exactly = 0) { annotations.setHighlightColor(any()) }
+            }
+        }
+
+        @Test
+        fun `set proxy history highlight denied access does not modify item`() {
+            val previousHandler = DataAccessSecurity.approvalHandler
+            val denyingHandler = mockk<DataAccessApprovalHandler>()
+            val proxy = mockk<Proxy>()
+            val item = historyItem(171, "https://one.test/", initialHighlight = HighlightColor.PINK)
+            val annotations = item.annotations()
+            DataAccessSecurity.approvalHandler = denyingHandler
+            dataAccessApprovalRequired = true
+            coEvery { denyingHandler.requestDataAccess(DataAccessType.HTTP_HISTORY, config) } returns false
+            every { api.proxy() } returns proxy
+            every { proxy.history() } returns listOf(item)
+            try {
+                runBlocking {
+                    assertEquals("HTTP history access denied by Burp Suite", client.callTool(
+                        "set_proxy_history_highlight", mapOf("historyId" to 171, "color" to "RED")
+                    ).expectTextContent())
+                    assertEquals(HighlightColor.PINK, annotations.highlightColor())
+                    verify(exactly = 0) { annotations.setHighlightColor(any()) }
                     verify(exactly = 0) { api.proxy() }
                     verify(exactly = 0) { api.http() }
                     verify(exactly = 0) { api.repeater() }

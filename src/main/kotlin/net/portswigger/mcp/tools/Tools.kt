@@ -7,6 +7,7 @@ import burp.api.montoya.collaborator.InteractionFilter
 import burp.api.montoya.core.BurpSuiteEdition
 import burp.api.montoya.http.HttpMode
 import burp.api.montoya.http.HttpService
+import burp.api.montoya.core.HighlightColor
 import burp.api.montoya.http.message.HttpHeader
 import burp.api.montoya.http.message.requests.HttpRequest
 import burp.api.montoya.proxy.ProxyHttpRequestResponse
@@ -331,6 +332,7 @@ fun Server.registerTools(api: MontoyaApi, config: McpConfig) {
             .filter { compiledRegex == null || it.contains(compiledRegex) }
             .map { item ->
                 val request = item.request()
+                val annotations = item.annotations()
                 Json.encodeToString(
                     ProxyHttpHistorySummary(
                         historyId = item.id(),
@@ -338,8 +340,9 @@ fun Server.registerTools(api: MontoyaApi, config: McpConfig) {
                         method = request?.method(),
                         url = request?.url(),
                         responseStatusCode = item.response()?.statusCode()?.toInt(),
-                        notes = item.annotations().notes(),
-                        edited = item.edited()
+                        notes = annotations.notes(),
+                        edited = item.edited(),
+                        highlightColor = if (annotations.hasHighlightColor()) annotations.highlightColor().name else null
                     )
                 )
             }
@@ -402,6 +405,27 @@ fun Server.registerTools(api: MontoyaApi, config: McpConfig) {
 
         api.logging().logToOutput("$operation notes on Proxy history item $historyId")
         "Notes $operation on Proxy history item $historyId"
+    }
+
+    mcpTool<SetProxyHistoryHighlight>(
+        "Sets or clears the highlight color of one Proxy HTTP history item selected by its Montoya history ID. Use an official Montoya HighlightColor value; NONE clears the highlight."
+    ) {
+        val allowed = checkDataAccessOrDeny(DataAccessType.HTTP_HISTORY, config, api, "HTTP history")
+        if (!allowed) {
+            return@mcpTool "HTTP history access denied by Burp Suite"
+        }
+
+        val selectedColor = HighlightColor.values().firstOrNull {
+            it.name.equals(color.trim(), ignoreCase = true)
+        } ?: throw IllegalArgumentException("Unsupported highlight color. Use an official Montoya HighlightColor value.")
+
+        val item = findProxyHistoryItem(api, historyId)
+            ?: return@mcpTool "No Proxy HTTP history item found with ID $historyId"
+        item.annotations().setHighlightColor(selectedColor)
+
+        val result = if (selectedColor == HighlightColor.NONE) "cleared" else "set to ${selectedColor.name}"
+        api.logging().logToOutput("Proxy history item $historyId highlight color ${selectedColor.name}")
+        "Highlight $result on Proxy history item $historyId"
     }
 
     mcpPaginatedTool<GetOrganizerItems>("Displays items within the Organizer tab") {
@@ -604,6 +628,9 @@ data class SendProxyHistoryToRepeater(val historyId: Int, val tabName: String? =
 data class SetProxyHistoryNotes(val historyId: Int, val notes: String, val append: Boolean = true)
 
 @Serializable
+data class SetProxyHistoryHighlight(val historyId: Int, val color: String)
+
+@Serializable
 data class ProxyHttpHistorySummary(
     val historyId: Int,
     val timestamp: String,
@@ -611,7 +638,8 @@ data class ProxyHttpHistorySummary(
     val url: String?,
     val responseStatusCode: Int?,
     val notes: String,
-    val edited: Boolean
+    val edited: Boolean,
+    val highlightColor: String?
 )
 
 @Serializable
