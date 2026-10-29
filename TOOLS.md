@@ -39,3 +39,12 @@
 | `get_organizer_item` | Read one size-limited Organizer item by official Montoya ID | ❌ | ✅ | Finds `OrganizerItem.id()` and uses existing bounded history-item serialization | ✅ |
 | `send_organizer_item_to_repeater` | Open one Organizer request in Repeater without transmitting it | ❌ | ✅ | Find the item by `OrganizerItem.id()` and pass its original `request()` directly to Montoya Repeater | ✅ |
 | `send_proxy_history_to_intruder` | Open a Proxy history request in Intruder without starting an attack | ❌ | ✅ | Find by `ProxyHttpRequestResponse.id()`, prefer `finalRequest()`, fall back to `request()`, and pass the original request to Montoya Intruder | ✅ |
+| `send_organizer_item_to_intruder` | Open an Organizer request in Intruder without sending it or starting an attack | ❌ | ✅ | Requires Organizer approval; finds `OrganizerItem.id()` and transfers `OrganizerItem.request()` directly to Montoya Intruder. A nonblank `tabName` is passed unchanged; omitted or blank names default to `Organizer <organizerId>`. The item remains unchanged. Inputs: `organizerId`, optional `tabName`. | ❌ |
+
+### `send_organizer_item_to_intruder`
+
+- Inputs: `organizerId` (official Montoya Organizer item ID), optional `tabName`.
+- Requires Organizer access approval.
+- Transfers the original Organizer request directly through Montoya; it is not serialized and reconstructed.
+- Uses a supplied nonblank tab name unchanged. Omitted or blank names use `Organizer <organizerId>`.
+- Opens the request for inspection. It does not transmit an HTTP request, start an Intruder attack, or modify the Organizer item.
