@@ -5,7 +5,7 @@
 feat(tools): add proxy HTTP history summary and lookup
 
 - Requests can be searched up with request id from proxy history
-- Responses can be obtained from indexing and also the interested request can be sent to repeater
+- A selected Proxy history item can be retrieved by its Montoya history ID.
 
 | Claude Console output | Burpsuite | 
 | --------------------- | --------- | 
