@@ -326,12 +326,13 @@ fun Server.registerTools(api: MontoyaApi, config: McpConfig) {
         api.proxy().history().asSequence()
             .filter { compiledRegex == null || it.contains(compiledRegex) }
             .map { item ->
+                val request = item.request()
                 Json.encodeToString(
                     ProxyHttpHistorySummary(
                         historyId = item.id(),
                         timestamp = item.time().toString(),
-                        method = item.method(),
-                        url = item.url(),
+                        method = request?.method(),
+                        url = request?.url(),
                         responseStatusCode = item.response()?.statusCode()?.toInt(),
                         notes = item.annotations().notes(),
                         edited = item.edited()
@@ -340,7 +341,7 @@ fun Server.registerTools(api: MontoyaApi, config: McpConfig) {
             }
     }
 
-    mcpTool<GetProxyHttpHistoryItem>("Returns a complete Proxy HTTP history item by its Montoya history ID") {
+    mcpTool<GetProxyHttpHistoryItem>("Returns a size-limited Proxy HTTP history item by its Montoya history ID. Large request or response fields may be truncated.") {
         val allowed = checkDataAccessOrDeny(DataAccessType.HTTP_HISTORY, config, api, "HTTP history")
         if (!allowed) {
             return@mcpTool "HTTP history access denied by Burp Suite"
@@ -548,8 +549,8 @@ data class GetProxyHttpHistoryItem(val historyId: Int)
 data class ProxyHttpHistorySummary(
     val historyId: Int,
     val timestamp: String,
-    val method: String,
-    val url: String,
+    val method: String?,
+    val url: String?,
     val responseStatusCode: Int?,
     val notes: String,
     val edited: Boolean

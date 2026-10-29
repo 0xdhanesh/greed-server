@@ -743,10 +743,12 @@ class ToolsKtTest {
         private fun historyItem(id: Int, url: String, body: String = "secret-request-body"): ProxyHttpRequestResponse {
             mockkStatic("net.portswigger.mcp.schema.SerializationKt")
             val item = mockk<ProxyHttpRequestResponse>()
+            val request = mockk<HttpRequest>()
+            every { request.method() } returns "GET"
+            every { request.url() } returns url
             every { item.id() } returns id
             every { item.time() } returns ZonedDateTime.parse("2026-10-29T10:00:00Z")
-            every { item.method() } returns "GET"
-            every { item.url() } returns url
+            every { item.request() } returns request
             every { item.edited() } returns false
             every { item.annotations() } returns mockk {
                 every { notes() } returns "test note"
