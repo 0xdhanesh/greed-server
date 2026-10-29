@@ -9,6 +9,7 @@ import burp.api.montoya.http.HttpMode
 import burp.api.montoya.http.HttpService
 import burp.api.montoya.http.message.HttpHeader
 import burp.api.montoya.http.message.requests.HttpRequest
+import burp.api.montoya.proxy.ProxyHttpRequestResponse
 import io.modelcontextprotocol.kotlin.sdk.server.Server
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
@@ -36,6 +37,9 @@ private suspend fun checkDataAccessOrDeny(
     api.logging().logToOutput("MCP $logMessage access granted")
     return true
 }
+
+private fun findProxyHistoryItem(api: MontoyaApi, historyId: Int): ProxyHttpRequestResponse? =
+    api.proxy().history().firstOrNull { it.id() == historyId }
 
 private fun buildHttp2HeaderList(
     pseudoHeaders: Map<String, String>, headers: Map<String, String>
@@ -347,9 +351,29 @@ fun Server.registerTools(api: MontoyaApi, config: McpConfig) {
             return@mcpTool "HTTP history access denied by Burp Suite"
         }
 
-        val item = api.proxy().history().firstOrNull { it.id() == historyId }
+        val item = findProxyHistoryItem(api, historyId)
             ?: return@mcpTool "No Proxy HTTP history item found with ID $historyId"
         encodeHistoryItem(item.toSerializableForm())
+    }
+
+    mcpTool<SendProxyHistoryToRepeater>(
+        "Opens an existing Proxy HTTP history request in Burp Repeater using its Montoya history ID. The request is not transmitted until the user or another explicitly authorized tool sends it."
+    ) {
+        val allowed = checkDataAccessOrDeny(DataAccessType.HTTP_HISTORY, config, api, "HTTP history")
+        if (!allowed) {
+            return@mcpTool "HTTP history access denied by Burp Suite"
+        }
+
+        val item = findProxyHistoryItem(api, historyId)
+            ?: return@mcpTool "No Proxy HTTP history item found with ID $historyId"
+        val request = item.finalRequest() ?: item.request()
+            ?: return@mcpTool "Proxy HTTP history item $historyId has no request to open in Repeater"
+        val resolvedTabName = tabName?.takeIf { it.isNotBlank() } ?: "History $historyId"
+
+        api.repeater().sendToRepeater(request, resolvedTabName)
+        api.logging().logToOutput("Opened Proxy history item $historyId in Repeater; request was not sent")
+
+        "Opened Proxy history item $historyId (${request.method()} ${request.httpService().host()}${request.path()}) in Repeater tab '$resolvedTabName'. Request was not sent."
     }
 
     mcpPaginatedTool<GetOrganizerItems>("Displays items within the Organizer tab") {
@@ -544,6 +568,9 @@ data class GetProxyHttpHistorySummary(
 
 @Serializable
 data class GetProxyHttpHistoryItem(val historyId: Int)
+
+@Serializable
+data class SendProxyHistoryToRepeater(val historyId: Int, val tabName: String? = null)
 
 @Serializable
 data class ProxyHttpHistorySummary(
