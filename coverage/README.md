@@ -77,3 +77,21 @@
 | Claude Console output | Burp Suite Organizer |
 | --------------------- | -------------------- |
 | ![Claude Organizer validation](./assets/29_10_26_send_proxy_history_to_organizer.png) | ![Proxy history item saved in Organizer](./assets/29_10_26_send_proxy_history_to_organizer1.png) |
+
+**feat(tools): add Organizer summary and item lookup**
+
+- Compact Organizer item summaries can be retrieved without exposing complete HTTP requests or responses.
+- Summaries include the official Montoya Organizer ID, status, method, URL, response status, notes, highlight color and response availability.
+- Organizer summaries support optional Java regular-expression filtering.
+- Regex filtering is applied before pagination.
+- Organizer items can be retrieved individually using their official Montoya Organizer ID.
+- Unknown Organizer IDs return a clear error without returning a different item.
+- Invalid regular expressions return a controlled error without disconnecting the MCP client.
+- Large request or response fields may be truncated by the existing shared serializer.
+- Both tools require Organizer access approval.
+- Both tools are read-only and do not modify Organizer items, annotations or statuses.
+- Retrieving Organizer data does not transmit an HTTP request or open Repeater or Intruder.
+
+| Claude Console output | Burp Suite Organizer |
+| --------------------- | -------------------- |
+| ![Claude Organizer lookup validation](./assets/29_10_26_get_organizer_items_summary.png) | ![Organizer item verified in Burp](./assets/29_10_26_get_organizer_items_summary1.png) |

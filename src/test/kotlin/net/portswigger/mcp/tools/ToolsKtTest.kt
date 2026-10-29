@@ -15,6 +15,9 @@ import burp.api.montoya.http.message.HttpRequestResponse as MontoyaHttpRequestRe
 import burp.api.montoya.http.message.requests.HttpRequest
 import burp.api.montoya.http.message.responses.HttpResponse
 import burp.api.montoya.organizer.Organizer
+import burp.api.montoya.organizer.OrganizerItem
+import burp.api.montoya.organizer.OrganizerItemFilter
+import burp.api.montoya.organizer.OrganizerItemStatus
 import burp.api.montoya.logging.Logging
 import burp.api.montoya.persistence.PersistedObject
 import burp.api.montoya.proxy.Proxy
@@ -745,6 +748,42 @@ class ToolsKtTest {
     
     @Nested
     inner class PaginatedToolsTests {
+        private fun organizerItem(
+            id: Int,
+            url: String,
+            status: OrganizerItemStatus = OrganizerItemStatus.NEW,
+            notes: String = "organizer note",
+            highlight: HighlightColor? = HighlightColor.YELLOW,
+            responseStatus: Short? = 200,
+            requestText: String = "GET $url HTTP/1.1\r\nAuthorization: REQUEST_HEADER_SECRET\r\n\r\nREQUEST_BODY_SECRET",
+            responseText: String = "HTTP/1.1 200 OK\r\nSet-Cookie: RESPONSE_HEADER_SECRET\r\n\r\nRESPONSE_BODY_SECRET"
+        ): OrganizerItem {
+            val item = mockk<OrganizerItem>()
+            val request = mockk<HttpRequest>()
+            val response = responseStatus?.let { mockk<HttpResponse>() }
+            val annotations = mockk<Annotations>()
+            every { item.id() } returns id
+            every { item.status() } returns status
+            every { item.request() } returns request
+            every { item.response() } returns response
+            every { item.hasResponse() } returns (response != null)
+            every { item.annotations() } returns annotations
+            every { item.contains(any<java.util.regex.Pattern>()) } answers {
+                firstArg<java.util.regex.Pattern>().matcher(url).find()
+            }
+            every { request.method() } returns "GET"
+            every { request.url() } returns url
+            every { request.toString() } returns requestText
+            every { annotations.notes() } returns notes
+            every { annotations.hasHighlightColor() } returns (highlight != null)
+            every { annotations.highlightColor() } returns (highlight ?: HighlightColor.NONE)
+            if (response != null) {
+                every { response.statusCode() } returns responseStatus
+                every { response.toString() } returns responseText
+            }
+            return item
+        }
+
         private fun historyItem(
             id: Int,
             url: String,
@@ -1500,6 +1539,269 @@ class ToolsKtTest {
             } finally {
                 dataAccessApprovalRequired = false
                 DataAccessSecurity.approvalHandler = previousHandler
+            }
+        }
+
+        @Test
+        fun `organizer summary returns compact official metadata and excludes HTTP contents`() {
+            val organizer = mockk<Organizer>()
+            val item = organizerItem(
+                7301,
+                "http://127.0.0.1:3000/rest/admin/application-version",
+                status = OrganizerItemStatus.DONE,
+                notes = "Finding note",
+                highlight = HighlightColor.CYAN,
+                responseStatus = 204
+            )
+            every { api.organizer() } returns organizer
+            every { organizer.items() } returns listOf(item)
+
+            runBlocking {
+                val json = Json.parseToJsonElement(client.callTool(
+                    "get_organizer_items_summary", mapOf("count" to 1, "offset" to 0)
+                ).expectTextContent()).jsonObject
+
+                assertEquals("7301", json.getValue("organizerId").jsonPrimitive.content)
+                assertEquals("DONE", json.getValue("organizerStatus").jsonPrimitive.content)
+                assertEquals("GET", json.getValue("method").jsonPrimitive.content)
+                assertEquals("http://127.0.0.1:3000/rest/admin/application-version", json.getValue("url").jsonPrimitive.content)
+                assertEquals("204", json.getValue("responseStatusCode").jsonPrimitive.content)
+                assertEquals("Finding note", json.getValue("notes").jsonPrimitive.content)
+                assertEquals("CYAN", json.getValue("highlightColor").jsonPrimitive.content)
+                assertEquals("true", json.getValue("hasResponse").jsonPrimitive.content)
+                assertEquals(
+                    setOf("organizerId", "organizerStatus", "method", "url", "responseStatusCode", "notes", "highlightColor", "hasResponse"),
+                    json.keys
+                )
+                val text = json.toString()
+                assertFalse(text.contains("REQUEST_HEADER_SECRET"))
+                assertFalse(text.contains("RESPONSE_HEADER_SECRET"))
+                assertFalse(text.contains("REQUEST_BODY_SECRET"))
+                assertFalse(text.contains("RESPONSE_BODY_SECRET"))
+                verify(exactly = 0) { api.http() }
+                verify(exactly = 0) { api.repeater() }
+                verify(exactly = 0) { api.intruder() }
+                verify(exactly = 0) { organizer.sendToOrganizer(any<HttpRequest>()) }
+                verify(exactly = 0) { organizer.sendToOrganizer(any<MontoyaHttpRequestResponse>()) }
+            }
+        }
+
+        @Test
+        fun `organizer summary handles items without response and blank regex`() {
+            val organizer = mockk<Organizer>()
+            val item = organizerItem(7302, "https://empty.test/", notes = "", highlight = null, responseStatus = null)
+            every { api.organizer() } returns organizer
+            every { organizer.items() } returns listOf(item)
+
+            runBlocking {
+                val text = client.callTool("get_organizer_items_summary", mapOf(
+                    "count" to 1, "offset" to 0, "regex" to "   "
+                )).expectTextContent()
+                val json = Json.parseToJsonElement(text).jsonObject
+                assertEquals("7302", json.getValue("organizerId").jsonPrimitive.content)
+                assertEquals("", json.getValue("notes").jsonPrimitive.content)
+                assertEquals("null", json.getValue("highlightColor").toString())
+                assertEquals("null", json.getValue("responseStatusCode").toString())
+                assertEquals("false", json.getValue("hasResponse").jsonPrimitive.content)
+                verify(exactly = 0) { item.response() }
+                verify(exactly = 0) { organizer.items(any<OrganizerItemFilter>()) }
+            }
+        }
+
+        @Test
+        fun `organizer summary regex filtering occurs before pagination`() {
+            val organizer = mockk<Organizer>()
+            val first = organizerItem(741, "https://shop.test/match/one")
+            val skipped = organizerItem(742, "https://shop.test/skip")
+            val last = organizerItem(743, "https://shop.test/match/two")
+            val allItems = listOf(first, skipped, last)
+            every { api.organizer() } returns organizer
+            every { organizer.items(any<OrganizerItemFilter>()) } answers {
+                val filter = firstArg<OrganizerItemFilter>()
+                allItems.filter(filter::matches)
+            }
+
+            runBlocking {
+                val pageOne = client.callTool("get_organizer_items_summary", mapOf(
+                    "count" to 1, "offset" to 0, "regex" to "match"
+                )).expectTextContent()
+                val pageTwo = client.callTool("get_organizer_items_summary", mapOf(
+                    "count" to 1, "offset" to 1, "regex" to "match"
+                )).expectTextContent()
+
+                assertTrue(pageOne.contains("\"organizerId\":741"))
+                assertFalse(pageOne.contains("742"))
+                assertTrue(pageTwo.contains("\"organizerId\":743"))
+                verify(exactly = 2) { organizer.items(any<OrganizerItemFilter>()) }
+                verify(exactly = 0) { organizer.items() }
+            }
+        }
+
+        @Test
+        fun `organizer summary omitted regex paginates and reports end of items`() {
+            val organizer = mockk<Organizer>()
+            every { api.organizer() } returns organizer
+            every { organizer.items() } returns listOf(
+                organizerItem(751, "https://one.test/"),
+                organizerItem(752, "https://two.test/")
+            )
+
+            runBlocking {
+                val first = client.callTool("get_organizer_items_summary", mapOf(
+                    "count" to 1, "offset" to 0
+                )).expectTextContent()
+                val second = client.callTool("get_organizer_items_summary", mapOf(
+                    "count" to 1, "offset" to 1, "regex" to ""
+                )).expectTextContent()
+                val end = client.callTool("get_organizer_items_summary", mapOf(
+                    "count" to 1, "offset" to 2
+                )).expectTextContent()
+
+                assertTrue(first.contains("\"organizerId\":751"))
+                assertFalse(first.contains("752"))
+                assertTrue(second.contains("\"organizerId\":752"))
+                assertEquals("Reached end of items", end)
+                verify(exactly = 3) { organizer.items() }
+                verify(exactly = 0) { organizer.items(any<OrganizerItemFilter>()) }
+            }
+        }
+
+        @Test
+        fun `organizer invalid regex returns controlled error and connection remains usable`() {
+            val organizer = mockk<Organizer>()
+            every { api.organizer() } returns organizer
+            every { organizer.items() } returns listOf(organizerItem(761, "https://one.test/"))
+
+            runBlocking {
+                val invalid = client.callTool("get_organizer_items_summary", mapOf(
+                    "count" to 1, "offset" to 0, "regex" to "["
+                ))
+                assertTrue(invalid?.isError ?: false)
+                assertTrue(((invalid?.content?.firstOrNull() as? TextContent)?.text ?: "").contains("Unclosed"))
+
+                val valid = client.callTool("get_organizer_items_summary", mapOf(
+                    "count" to 1, "offset" to 0
+                )).expectTextContent()
+                assertTrue(valid.contains("\"organizerId\":761"))
+            }
+        }
+
+        @Test
+        fun `organizer summary access denial returns existing denial message`() {
+            val previousHandler = DataAccessSecurity.approvalHandler
+            val denyingHandler = mockk<DataAccessApprovalHandler>()
+            DataAccessSecurity.approvalHandler = denyingHandler
+            dataAccessApprovalRequired = true
+            coEvery { denyingHandler.requestDataAccess(DataAccessType.ORGANIZER, config) } returns false
+            try {
+                runBlocking {
+                    assertEquals("Organizer access denied by Burp Suite", client.callTool(
+                        "get_organizer_items_summary", mapOf("count" to 1, "offset" to 0)
+                    ).expectTextContent())
+                    verify(exactly = 0) { api.organizer() }
+                }
+            } finally {
+                dataAccessApprovalRequired = false
+                DataAccessSecurity.approvalHandler = previousHandler
+            }
+        }
+
+        @Test
+        fun `organizer item lookup uses official ID and returns serialized request and response`() {
+            val organizer = mockk<Organizer>()
+            val other = organizerItem(81, "https://other.test/")
+            val selected = organizerItem(
+                98765,
+                "https://shop.test/rest/admin/application-version",
+                status = OrganizerItemStatus.IN_PROGRESS,
+                notes = "selected note",
+                requestText = "GET /rest/admin/application-version HTTP/1.1\r\n\r\nselected request",
+                responseText = "HTTP/1.1 200 OK\r\n\r\nselected response"
+            )
+            every { api.organizer() } returns organizer
+            every { organizer.items() } returns listOf(other, selected)
+
+            runBlocking {
+                val text = client.callTool("get_organizer_item", mapOf("organizerId" to 98765)).expectTextContent()
+                val json = Json.parseToJsonElement(text).jsonObject
+                assertEquals("98765", json.getValue("id").jsonPrimitive.content)
+                assertEquals("In progress", json.getValue("status").jsonPrimitive.content)
+                assertTrue(json.getValue("request").jsonPrimitive.content.contains("selected request"))
+                assertTrue(json.getValue("response").jsonPrimitive.content.contains("selected response"))
+                assertEquals("selected note", json.getValue("notes").jsonPrimitive.content)
+                verify(exactly = 1) { other.id() }
+                verify(exactly = 2) { selected.id() }
+                verify(exactly = 0) { api.http() }
+                verify(exactly = 0) { api.repeater() }
+                verify(exactly = 0) { api.intruder() }
+                verify(exactly = 0) { organizer.sendToOrganizer(any<HttpRequest>()) }
+                verify(exactly = 0) { organizer.sendToOrganizer(any<MontoyaHttpRequestResponse>()) }
+            }
+        }
+
+        @Test
+        fun `organizer item lookup handles no response and unknown official ID`() {
+            val organizer = mockk<Organizer>()
+            val item = organizerItem(91, "https://no-response.test/", responseStatus = null)
+            every { api.organizer() } returns organizer
+            every { organizer.items() } returns listOf(item)
+
+            runBlocking {
+                val text = client.callTool("get_organizer_item", mapOf("organizerId" to 91)).expectTextContent()
+                val json = Json.parseToJsonElement(text).jsonObject
+                assertEquals("<no response>", json.getValue("response").jsonPrimitive.content)
+                assertEquals("No Organizer item found with ID 999", client.callTool(
+                    "get_organizer_item", mapOf("organizerId" to 999)
+                ).expectTextContent())
+            }
+        }
+
+        @Test
+        fun `organizer item access denial prevents lookup`() {
+            val previousHandler = DataAccessSecurity.approvalHandler
+            val denyingHandler = mockk<DataAccessApprovalHandler>()
+            DataAccessSecurity.approvalHandler = denyingHandler
+            dataAccessApprovalRequired = true
+            coEvery { denyingHandler.requestDataAccess(DataAccessType.ORGANIZER, config) } returns false
+            try {
+                runBlocking {
+                    assertEquals("Organizer access denied by Burp Suite", client.callTool(
+                        "get_organizer_item", mapOf("organizerId" to 123)
+                    ).expectTextContent())
+                    verify(exactly = 0) { api.organizer() }
+                }
+            } finally {
+                dataAccessApprovalRequired = false
+                DataAccessSecurity.approvalHandler = previousHandler
+            }
+        }
+
+        @Test
+        fun `organizer item lookup uses bounded valid JSON and does not mutate annotations`() {
+            val organizer = mockk<Organizer>()
+            val item = organizerItem(
+                801,
+                "https://large.test/",
+                requestText = "GET / HTTP/1.1\r\n\r\n${"Q".repeat(7000)}",
+                responseText = "HTTP/1.1 200 OK\r\n\r\n${"R".repeat(7000)}"
+            )
+            val annotations = item.annotations()
+            every { api.organizer() } returns organizer
+            every { organizer.items() } returns listOf(item)
+
+            runBlocking {
+                val text = client.callTool("get_organizer_item", mapOf("organizerId" to 801)).expectTextContent()
+                val json = Json.parseToJsonElement(text).jsonObject
+                assertTrue(text.length <= 5000)
+                assertTrue(text.contains("... (truncated)"))
+                assertEquals("801", json.getValue("id").jsonPrimitive.content)
+                verify(exactly = 0) { annotations.setNotes(any()) }
+                verify(exactly = 0) { annotations.setHighlightColor(any()) }
+                verify(exactly = 0) { api.http() }
+                verify(exactly = 0) { api.repeater() }
+                verify(exactly = 0) { api.intruder() }
+                verify(exactly = 0) { organizer.sendToOrganizer(any<HttpRequest>()) }
+                verify(exactly = 0) { organizer.sendToOrganizer(any<MontoyaHttpRequestResponse>()) }
             }
         }
 
