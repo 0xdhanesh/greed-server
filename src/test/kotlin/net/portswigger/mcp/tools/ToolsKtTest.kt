@@ -18,6 +18,7 @@ import burp.api.montoya.organizer.Organizer
 import burp.api.montoya.organizer.OrganizerItem
 import burp.api.montoya.organizer.OrganizerItemFilter
 import burp.api.montoya.organizer.OrganizerItemStatus
+import burp.api.montoya.repeater.Repeater
 import burp.api.montoya.logging.Logging
 import burp.api.montoya.persistence.PersistedObject
 import burp.api.montoya.proxy.Proxy
@@ -1802,6 +1803,124 @@ class ToolsKtTest {
                 verify(exactly = 0) { api.intruder() }
                 verify(exactly = 0) { organizer.sendToOrganizer(any<HttpRequest>()) }
                 verify(exactly = 0) { organizer.sendToOrganizer(any<MontoyaHttpRequestResponse>()) }
+            }
+        }
+
+        @Test
+        fun `organizer item to repeater uses official ID and exact request with safe explicit tab name`() {
+            val organizer = mockk<Organizer>()
+            val repeater = mockk<Repeater>(relaxed = true)
+            val other = organizerItem(80, "https://other.test/?token=OTHER_QUERY_SECRET")
+            val selected = organizerItem(
+                902,
+                "https://shop.test/rest/admin/application-version?token=URL_SECRET",
+                notes = "ORGANIZER_NOTE_SECRET",
+                requestText = "GET /rest/admin/application-version?token=HEADER_SECRET HTTP/1.1\r\nAuthorization: AUTH_SECRET\r\nCookie: COOKIE_SECRET\r\n\r\nBODY_SECRET"
+            )
+            val selectedRequest = selected.request()
+            val annotations = selected.annotations()
+            every { api.organizer() } returns organizer
+            every { organizer.items() } returns listOf(other, selected)
+            every { api.repeater() } returns repeater
+
+            runBlocking {
+                val text = client.callTool("send_organizer_item_to_repeater", mapOf(
+                    "organizerId" to 902, "tabName" to "MCP Organizer validation"
+                )).expectTextContent()
+
+                assertEquals(
+                    "Opened Organizer item 902 in Repeater tab 'MCP Organizer validation'. Request was not transmitted.",
+                    text
+                )
+                assertFalse(text.contains("shop.test"))
+                assertFalse(text.contains("AUTH_SECRET"))
+                assertFalse(text.contains("COOKIE_SECRET"))
+                assertFalse(text.contains("BODY_SECRET"))
+                assertFalse(text.contains("ORGANIZER_NOTE_SECRET"))
+                assertFalse(text.contains("URL_SECRET"))
+                assertFalse(text.contains("HEADER_SECRET"))
+                verify(exactly = 1) { other.id() }
+                verify(exactly = 1) { selected.id() }
+                verify(exactly = 2) { selected.request() }
+                verify(exactly = 1) { repeater.sendToRepeater(selectedRequest, "MCP Organizer validation") }
+                verify(exactly = 0) { annotations.setNotes(any()) }
+                verify(exactly = 0) { annotations.setHighlightColor(any()) }
+                verify(exactly = 0) { api.http() }
+                verify(exactly = 0) { api.intruder() }
+                verify(exactly = 0) { api.proxy() }
+                verify(exactly = 0) { organizer.sendToOrganizer(any<HttpRequest>()) }
+                verify(exactly = 0) { organizer.sendToOrganizer(any<MontoyaHttpRequestResponse>()) }
+            }
+        }
+
+        @Test
+        fun `organizer item to repeater uses deterministic default for omitted and blank tab names`() {
+            val organizer = mockk<Organizer>()
+            val repeater = mockk<Repeater>(relaxed = true)
+            val item = organizerItem(77, "https://shop.test/")
+            val request = item.request()
+            every { api.organizer() } returns organizer
+            every { organizer.items() } returns listOf(item)
+            every { api.repeater() } returns repeater
+
+            runBlocking {
+                assertTrue(client.callTool("send_organizer_item_to_repeater", mapOf(
+                    "organizerId" to 77
+                )).expectTextContent().contains("Organizer 77"))
+                assertTrue(client.callTool("send_organizer_item_to_repeater", mapOf(
+                    "organizerId" to 77, "tabName" to "   "
+                )).expectTextContent().contains("Organizer 77"))
+                verify(exactly = 2) { repeater.sendToRepeater(request, "Organizer 77") }
+            }
+        }
+
+        @Test
+        fun `organizer item to repeater fails safely for unknown ID or missing request`() {
+            val organizer = mockk<Organizer>()
+            val repeater = mockk<Repeater>(relaxed = true)
+            val item = mockk<OrganizerItem>()
+            every { item.id() } returns 99
+            every { item.request() } returns null
+            every { api.organizer() } returns organizer
+            every { organizer.items() } returns listOf(item)
+            every { api.repeater() } returns repeater
+
+            runBlocking {
+                assertEquals("No Organizer item found with ID 100", client.callTool(
+                    "send_organizer_item_to_repeater", mapOf("organizerId" to 100)
+                ).expectTextContent())
+                assertTrue(client.callTool("send_organizer_item_to_repeater", mapOf(
+                    "organizerId" to 99
+                )).expectTextContent().contains("has no request"))
+                verify(exactly = 0) { api.repeater() }
+                verify(exactly = 0) { repeater.sendToRepeater(any<HttpRequest>()) }
+                verify(exactly = 0) { repeater.sendToRepeater(any<HttpRequest>(), any()) }
+                verify(exactly = 0) { api.http() }
+            }
+        }
+
+        @Test
+        fun `organizer item to repeater access denial prevents lookup and opening`() {
+            val previousHandler = DataAccessSecurity.approvalHandler
+            val denyingHandler = mockk<DataAccessApprovalHandler>()
+            val repeater = mockk<Repeater>(relaxed = true)
+            DataAccessSecurity.approvalHandler = denyingHandler
+            dataAccessApprovalRequired = true
+            coEvery { denyingHandler.requestDataAccess(DataAccessType.ORGANIZER, config) } returns false
+            try {
+                runBlocking {
+                    assertEquals("Organizer access denied by Burp Suite", client.callTool(
+                        "send_organizer_item_to_repeater", mapOf("organizerId" to 123)
+                    ).expectTextContent())
+                    verify(exactly = 0) { api.organizer() }
+                    verify(exactly = 0) { api.repeater() }
+                    verify(exactly = 0) { repeater.sendToRepeater(any<HttpRequest>()) }
+                    verify(exactly = 0) { repeater.sendToRepeater(any<HttpRequest>(), any()) }
+                    verify(exactly = 0) { api.http() }
+                }
+            } finally {
+                dataAccessApprovalRequired = false
+                DataAccessSecurity.approvalHandler = previousHandler
             }
         }
 

@@ -11,6 +11,7 @@ import burp.api.montoya.core.HighlightColor
 import burp.api.montoya.http.message.HttpHeader
 import burp.api.montoya.http.message.HttpRequestResponse as MontoyaHttpRequestResponse
 import burp.api.montoya.http.message.requests.HttpRequest
+import burp.api.montoya.organizer.OrganizerItem
 import burp.api.montoya.proxy.ProxyHttpRequestResponse
 import io.modelcontextprotocol.kotlin.sdk.server.Server
 import kotlinx.coroutines.currentCoroutineContext
@@ -42,6 +43,9 @@ private suspend fun checkDataAccessOrDeny(
 
 private fun findProxyHistoryItem(api: MontoyaApi, historyId: Int): ProxyHttpRequestResponse? =
     api.proxy().history().firstOrNull { it.id() == historyId }
+
+private fun findOrganizerItem(api: MontoyaApi, organizerId: Int): OrganizerItem? =
+    api.organizer().items().firstOrNull { it.id() == organizerId }
 
 private fun buildHttp2HeaderList(
     pseudoHeaders: Map<String, String>, headers: Map<String, String>
@@ -525,9 +529,29 @@ fun Server.registerTools(api: MontoyaApi, config: McpConfig) {
             return@mcpTool "Organizer access denied by Burp Suite"
         }
 
-        val item = api.organizer().items().firstOrNull { it.id() == organizerId }
+        val item = findOrganizerItem(api, organizerId)
             ?: return@mcpTool "No Organizer item found with ID $organizerId"
         encodeHistoryItem(item.toSerializableForm())
+    }
+
+    mcpTool<SendOrganizerItemToRepeater>(
+        "Opens the request from one Burp Organizer item in Repeater using its official Montoya Organizer ID. The request is opened for inspection and is not transmitted."
+    ) {
+        val allowed = checkDataAccessOrDeny(DataAccessType.ORGANIZER, config, api, "Organizer")
+        if (!allowed) {
+            return@mcpTool "Organizer access denied by Burp Suite"
+        }
+
+        val item = findOrganizerItem(api, organizerId)
+            ?: return@mcpTool "No Organizer item found with ID $organizerId"
+        val request = item.request()
+            ?: return@mcpTool "Organizer item $organizerId has no request to open in Repeater"
+        val resolvedTabName = tabName?.takeIf { it.isNotBlank() } ?: "Organizer $organizerId"
+
+        api.repeater().sendToRepeater(request, resolvedTabName)
+        api.logging().logToOutput("Opened Organizer item $organizerId in Repeater; request was not transmitted")
+
+        "Opened Organizer item $organizerId in Repeater tab '$resolvedTabName'. Request was not transmitted."
     }
 
     mcpPaginatedTool<GetProxyWebsocketHistory>("Displays items within the proxy WebSocket history") {
@@ -742,6 +766,9 @@ data class GetOrganizerItemsSummary(
 
 @Serializable
 data class GetOrganizerItem(val organizerId: Int)
+
+@Serializable
+data class SendOrganizerItemToRepeater(val organizerId: Int, val tabName: String? = null)
 
 @Serializable
 data class OrganizerItemSummary(

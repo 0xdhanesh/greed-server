@@ -95,3 +95,21 @@
 | Claude Console output | Burp Suite Organizer |
 | --------------------- | -------------------- |
 | ![Claude Organizer lookup validation](./assets/29_10_26_get_organizer_items_summary.png) | ![Organizer item verified in Burp](./assets/29_10_26_get_organizer_items_summary1.png) |
+
+**feat(tools): open Organizer requests in Repeater**
+
+- A request saved in Burp Organizer can be opened in Repeater using its official Montoya Organizer ID.
+- Organizer access approval is required before an item is read or opened.
+- The original Organizer request is transferred directly through Montoya without serialization or reconstruction.
+- Explicit Repeater tab names are supported and passed unchanged.
+- Omitted or blank tab names use the default `Organizer <organizerId>` format.
+- Unknown Organizer IDs return a clear error without creating a Repeater tab.
+- Missing requests return a controlled error without opening Repeater.
+- Tool results and logs do not expose HTTP contents, notes, cookies, tokens or authorization data.
+- Opening the request in Repeater does not transmit the HTTP request.
+- The source Organizer item, its annotations and its status remain unchanged.
+- The Organizer response is not transferred; the Repeater response pane remains empty until the request is manually sent.
+
+| Claude Console output | Burp Suite Repeater |
+| --------------------- | ------------------- |
+| ![Claude Organizer Repeater validation](./assets/30_10_26_send_organizer_item_to_repeater.png) | ![Organizer request opened in Repeater](./assets/30_10_26_send_organizer_item_to_repeater1.png) |
