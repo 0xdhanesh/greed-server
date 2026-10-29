@@ -2,7 +2,7 @@ Uuid: 9952290f04ed4f628e624d0aa9dccebc
 ExtensionType: 1
 Name: MCP Server
 RepoName: mcp-server
-ScreenVersion: 0.0.3
+ScreenVersion: 0.0.4
 SerialVersion: 10
 MinPlatformVersion: 26
 ProOnly: False

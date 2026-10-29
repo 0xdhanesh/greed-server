@@ -32,4 +32,5 @@
 | `get_proxy_http_history_summary` | Paginated metadata-only Proxy HTTP history | ❌ | ✅ | Montoya history metadata; optional regex filtering before pagination | ✅ |
 | `get_proxy_http_history_item` | Read one history item by Montoya history ID | ❌ | ✅ | Lookup by `ProxyHttpRequestResponse.id()` and existing serializer | ✅ |
 | `send_proxy_history_to_repeater` | Open a Proxy history request in Repeater without sending it | ❌ | ✅ | Lookup by Montoya history ID; prefer `finalRequest()`, fall back to `request()`, then call Montoya Repeater API | ✅ |
+| `set_proxy_history_notes` | Append or replace notes on one Proxy history item | ❌ | ✅ | Lookup by Montoya history ID and update Montoya annotations; append defaults to true | ✅ |
 

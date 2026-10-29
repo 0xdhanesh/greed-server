@@ -376,6 +376,34 @@ fun Server.registerTools(api: MontoyaApi, config: McpConfig) {
         "Opened Proxy history item $historyId (${request.method()} ${request.httpService().host()}${request.path()}) in Repeater tab '$resolvedTabName'. Request was not sent."
     }
 
+    mcpTool<SetProxyHistoryNotes>(
+        "Appends or replaces notes on one Proxy HTTP history item selected by its Montoya history ID. Appending is the default to preserve existing notes."
+    ) {
+        if (notes.isBlank()) {
+            throw IllegalArgumentException("Notes must not be blank")
+        }
+
+        val allowed = checkDataAccessOrDeny(DataAccessType.HTTP_HISTORY, config, api, "HTTP history")
+        if (!allowed) {
+            return@mcpTool "HTTP history access denied by Burp Suite"
+        }
+
+        val item = findProxyHistoryItem(api, historyId)
+            ?: return@mcpTool "No Proxy HTTP history item found with ID $historyId"
+        val annotations = item.annotations()
+        val operation = if (append) {
+            val existingNotes = annotations.notes()
+            annotations.setNotes(if (existingNotes.isNotBlank()) "$existingNotes\n$notes" else notes)
+            "appended"
+        } else {
+            annotations.setNotes(notes)
+            "replaced"
+        }
+
+        api.logging().logToOutput("$operation notes on Proxy history item $historyId")
+        "Notes $operation on Proxy history item $historyId"
+    }
+
     mcpPaginatedTool<GetOrganizerItems>("Displays items within the Organizer tab") {
         val allowed = checkDataAccessOrDeny(DataAccessType.ORGANIZER, config, api, "Organizer")
         if (!allowed) {
@@ -571,6 +599,9 @@ data class GetProxyHttpHistoryItem(val historyId: Int)
 
 @Serializable
 data class SendProxyHistoryToRepeater(val historyId: Int, val tabName: String? = null)
+
+@Serializable
+data class SetProxyHistoryNotes(val historyId: Int, val notes: String, val append: Boolean = true)
 
 @Serializable
 data class ProxyHttpHistorySummary(
