@@ -19,6 +19,7 @@ import burp.api.montoya.utilities.RandomUtils
 import burp.api.montoya.utilities.URLUtils
 import burp.api.montoya.utilities.Utilities
 import io.mockk.*
+import io.mockk.coEvery
 import java.net.InetAddress
 import java.time.ZonedDateTime
 import java.util.Optional
@@ -36,6 +37,9 @@ import net.portswigger.mcp.TestSseMcpClient
 import net.portswigger.mcp.config.McpConfig
 import net.portswigger.mcp.schema.HttpRequestResponse
 import net.portswigger.mcp.schema.toSerializableForm
+import net.portswigger.mcp.security.DataAccessSecurity
+import net.portswigger.mcp.security.DataAccessApprovalHandler
+import net.portswigger.mcp.security.DataAccessType
 import org.junit.jupiter.api.AfterEach
 import org.junit.jupiter.api.Assertions.*
 import org.junit.jupiter.api.BeforeEach
@@ -54,13 +58,14 @@ class ToolsKtTest {
     private val config: McpConfig
     private val mockHeaders = mutableListOf<HttpHeader>()
     private val capturedRequest = slot<HttpRequest>()
+    private var dataAccessApprovalRequired = false
 
     init {
         val persistedObject = mockk<PersistedObject>().apply {
             every { getBoolean("enabled") } returns true
             every { getBoolean("configEditingTooling") } returns true
             every { getBoolean("requireHttpRequestApproval") } returns false
-            every { getBoolean("requireDataAccessApproval") } returns false
+            every { getBoolean("requireDataAccessApproval") } answers { dataAccessApprovalRequired }
             every { getBoolean("_alwaysAllowHttpHistory") } returns false
             every { getBoolean("_alwaysAllowWebSocketHistory") } returns false
             every { getBoolean("_alwaysAllowOrganizer") } returns false
@@ -735,6 +740,141 @@ class ToolsKtTest {
     
     @Nested
     inner class PaginatedToolsTests {
+        private fun historyItem(id: Int, url: String, body: String = "secret-request-body"): ProxyHttpRequestResponse {
+            mockkStatic("net.portswigger.mcp.schema.SerializationKt")
+            val item = mockk<ProxyHttpRequestResponse>()
+            every { item.id() } returns id
+            every { item.time() } returns ZonedDateTime.parse("2026-10-29T10:00:00Z")
+            every { item.method() } returns "GET"
+            every { item.url() } returns url
+            every { item.edited() } returns false
+            every { item.annotations() } returns mockk {
+                every { notes() } returns "test note"
+            }
+            every { item.response() } returns null
+            every { item.contains(any<java.util.regex.Pattern>()) } answers {
+                firstArg<java.util.regex.Pattern>().matcher(url).find()
+            }
+            every { item.toSerializableForm() } returns HttpRequestResponse(
+                request = "GET $url HTTP/1.1\r\n\r\n$body",
+                response = "<no response>",
+                notes = "test note"
+            )
+            return item
+        }
+
+        @Test
+        fun `history summary filters before pagination and excludes message bodies`() {
+            val proxy = mockk<Proxy>()
+            every { api.proxy() } returns proxy
+            every { proxy.history() } returns listOf(
+                historyItem(71, "https://one.test/match", "REQUEST_SECRET"),
+                historyItem(72, "https://two.test/skip", "REQUEST_SECRET"),
+                historyItem(73, "https://three.test/match", "REQUEST_SECRET")
+            )
+
+            runBlocking {
+                val first = client.callTool("get_proxy_http_history_summary", mapOf(
+                    "count" to 1, "offset" to 0, "regex" to "match"
+                )).expectTextContent()
+                val second = client.callTool("get_proxy_http_history_summary", mapOf(
+                    "count" to 1, "offset" to 1, "regex" to "match"
+                )).expectTextContent()
+
+                assertTrue(first.contains("\"historyId\":71"))
+                assertTrue(second.contains("\"historyId\":73"))
+                assertFalse(first.contains("REQUEST_SECRET"))
+                assertFalse(first.contains("secret-request-body"))
+                assertFalse(first.contains("<no response>"))
+            }
+        }
+
+        @Test
+        fun `history summary accepts omitted regex`() {
+            val proxy = mockk<Proxy>()
+            every { api.proxy() } returns proxy
+            every { proxy.history() } returns listOf(historyItem(81, "https://one.test/"))
+
+            runBlocking {
+                val text = client.callTool("get_proxy_http_history_summary", mapOf(
+                    "count" to 1, "offset" to 0
+                )).expectTextContent()
+                assertTrue(text.contains("\"historyId\":81"))
+            }
+        }
+
+        @Test
+        fun `invalid history summary regex returns tool error`() {
+            val proxy = mockk<Proxy>()
+            every { api.proxy() } returns proxy
+            every { proxy.history() } returns emptyList()
+
+            runBlocking {
+                val result = client.callTool("get_proxy_http_history_summary", mapOf(
+                    "count" to 1, "offset" to 0, "regex" to "["
+                ))
+                assertTrue(result?.isError ?: false)
+                assertTrue(((result?.content?.firstOrNull() as? TextContent)?.text ?: "").contains("Unclosed"))
+            }
+        }
+
+        @Test
+        fun `history summary and item respect denied history access`() {
+            val previousHandler = DataAccessSecurity.approvalHandler
+            val denyingHandler = mockk<DataAccessApprovalHandler>()
+            DataAccessSecurity.approvalHandler = denyingHandler
+            dataAccessApprovalRequired = true
+            coEvery { denyingHandler.requestDataAccess(DataAccessType.HTTP_HISTORY, config) } returns false
+            try {
+                runBlocking {
+                    assertEquals("HTTP history access denied by Burp Suite", client.callTool(
+                        "get_proxy_http_history_summary", mapOf("count" to 1, "offset" to 0)
+                    ).expectTextContent())
+                    assertEquals("HTTP history access denied by Burp Suite", client.callTool(
+                        "get_proxy_http_history_item", mapOf("historyId" to 71)
+                    ).expectTextContent())
+                }
+            } finally {
+                dataAccessApprovalRequired = false
+                DataAccessSecurity.approvalHandler = previousHandler
+            }
+        }
+
+        @Test
+        fun `history item resolves official ID and safely serializes absent response`() {
+            val proxy = mockk<Proxy>()
+            val item = historyItem(901, "https://one.test/", "REQUEST_SECRET")
+            every { api.proxy() } returns proxy
+            every { proxy.history() } returns listOf(item)
+            mockkStatic("net.portswigger.mcp.schema.SerializationKt")
+            every { item.toSerializableForm() } returns HttpRequestResponse(
+                request = "GET / HTTP/1.1\r\n\r\nrequest body",
+                response = "<no response>",
+                notes = "test note"
+            )
+
+            runBlocking {
+                val text = client.callTool("get_proxy_http_history_item", mapOf("historyId" to 901))
+                    .expectTextContent()
+                assertTrue(text.contains("<no response>"))
+                verify(exactly = 1) { item.id() }
+            }
+        }
+
+        @Test
+        fun `history item reports unknown ID`() {
+            val proxy = mockk<Proxy>()
+            val item = historyItem(901, "https://one.test/")
+            every { api.proxy() } returns proxy
+            every { proxy.history() } returns listOf(item)
+
+            runBlocking {
+                assertEquals("No Proxy HTTP history item found with ID 999", client.callTool(
+                    "get_proxy_http_history_item", mapOf("historyId" to 999)
+                ).expectTextContent())
+            }
+        }
+
         @Test
         fun `get proxy history should paginate properly`() {
             val proxy = mockk<Proxy>()
