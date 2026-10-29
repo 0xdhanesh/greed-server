@@ -5,6 +5,7 @@ import burp.api.montoya.burpsuite.TaskExecutionEngine
 import burp.api.montoya.collaborator.*
 import burp.api.montoya.core.BurpSuiteEdition
 import burp.api.montoya.core.ByteArray
+import burp.api.montoya.core.Annotations
 import burp.api.montoya.http.Http
 import burp.api.montoya.http.HttpMode
 import burp.api.montoya.http.HttpProtocol
@@ -740,7 +741,12 @@ class ToolsKtTest {
     
     @Nested
     inner class PaginatedToolsTests {
-        private fun historyItem(id: Int, url: String, body: String = "secret-request-body"): ProxyHttpRequestResponse {
+        private fun historyItem(
+            id: Int,
+            url: String,
+            body: String = "secret-request-body",
+            initialNotes: String = "test note"
+        ): ProxyHttpRequestResponse {
             mockkStatic("net.portswigger.mcp.schema.SerializationKt")
             val item = mockk<ProxyHttpRequestResponse>()
             val request = mockk<HttpRequest>()
@@ -751,9 +757,13 @@ class ToolsKtTest {
             every { item.finalRequest() } returns null
             every { item.request() } returns request
             every { item.edited() } returns false
-            every { item.annotations() } returns mockk {
-                every { notes() } returns "test note"
+            val annotations = mockk<Annotations>()
+            var notesValue = initialNotes
+            every { annotations.notes() } answers { notesValue }
+            every { annotations.setNotes(any()) } answers {
+                notesValue = firstArg()
             }
+            every { item.annotations() } returns annotations
             every { item.response() } returns null
             every { item.contains(any<java.util.regex.Pattern>()) } answers {
                 firstArg<java.util.regex.Pattern>().matcher(url).find()
@@ -1010,6 +1020,137 @@ class ToolsKtTest {
                     ).expectTextContent())
                     verify(exactly = 0) { api.repeater() }
                     verify(exactly = 0) { api.http() }
+                }
+            } finally {
+                dataAccessApprovalRequired = false
+                DataAccessSecurity.approvalHandler = previousHandler
+            }
+        }
+
+        @Test
+        fun `set proxy history notes defaults to append for empty and existing notes`() {
+            val proxy = mockk<Proxy>()
+            val emptyNotesItem = historyItem(61, "https://one.test/", initialNotes = "")
+            val existingNotesItem = historyItem(62, "https://two.test/", initialNotes = "Existing note")
+            val emptyAnnotations = emptyNotesItem.annotations()
+            val existingAnnotations = existingNotesItem.annotations()
+            every { api.proxy() } returns proxy
+            every { proxy.history() } returns listOf(emptyNotesItem, existingNotesItem)
+
+            runBlocking {
+                val emptyResult = client.callTool("set_proxy_history_notes", mapOf(
+                    "historyId" to 61, "notes" to "New finding"
+                )).expectTextContent()
+                val appendResult = client.callTool("set_proxy_history_notes", mapOf(
+                    "historyId" to 62, "notes" to "Second finding"
+                )).expectTextContent()
+
+                assertEquals("New finding", emptyAnnotations.notes())
+                assertEquals("Existing note\nSecond finding", existingAnnotations.notes())
+                assertTrue(emptyResult.contains("appended"))
+                assertTrue(appendResult.contains("appended"))
+                assertFalse(emptyResult.contains("New finding"))
+                assertFalse(appendResult.contains("Second finding"))
+                verify(exactly = 1) { emptyAnnotations.setNotes("New finding") }
+                verify(exactly = 1) { existingAnnotations.setNotes("Existing note\nSecond finding") }
+                verify(exactly = 0) { api.http() }
+                verify(exactly = 0) { api.repeater() }
+                verify(exactly = 0) { api.intruder() }
+            }
+        }
+
+        @Test
+        fun `set proxy history notes replaces only the selected item`() {
+            val proxy = mockk<Proxy>()
+            val selected = historyItem(71, "https://selected.test/", initialNotes = "Old note")
+            val other = historyItem(72, "https://other.test/", initialNotes = "Other note")
+            val selectedAnnotations = selected.annotations()
+            val otherAnnotations = other.annotations()
+            every { api.proxy() } returns proxy
+            every { proxy.history() } returns listOf(other, selected)
+
+            runBlocking {
+                val result = client.callTool("set_proxy_history_notes", mapOf(
+                    "historyId" to 71, "notes" to "Replacement note", "append" to false
+                )).expectTextContent()
+
+                assertEquals("Replacement note", selectedAnnotations.notes())
+                assertEquals("Other note", otherAnnotations.notes())
+                assertTrue(result.contains("replaced"))
+                assertFalse(result.contains("Replacement note"))
+                verify(exactly = 1) { selectedAnnotations.setNotes("Replacement note") }
+                verify(exactly = 0) { otherAnnotations.setNotes(any()) }
+                verify(exactly = 0) { api.http() }
+                verify(exactly = 0) { api.repeater() }
+                verify(exactly = 0) { api.intruder() }
+            }
+        }
+
+        @Test
+        fun `set proxy history notes rejects blank input without changing notes`() {
+            val proxy = mockk<Proxy>()
+            val item = historyItem(81, "https://one.test/", initialNotes = "Keep this note")
+            val annotations = item.annotations()
+            every { api.proxy() } returns proxy
+            every { proxy.history() } returns listOf(item)
+
+            runBlocking {
+                for (invalidNotes in listOf("", "   \t\n")) {
+                    val result = client.callTool("set_proxy_history_notes", mapOf(
+                        "historyId" to 81, "notes" to invalidNotes
+                    ))
+                    assertTrue(result?.isError ?: false)
+                    assertTrue(((result?.content?.firstOrNull() as? TextContent)?.text ?: "").contains("must not be blank"))
+                }
+                assertEquals("Keep this note", annotations.notes())
+                verify(exactly = 0) { annotations.setNotes(any()) }
+            }
+        }
+
+        @Test
+        fun `set proxy history notes unknown ID does not modify another item`() {
+            val proxy = mockk<Proxy>()
+            val item = historyItem(91, "https://one.test/", initialNotes = "Preserve me")
+            val annotations = item.annotations()
+            every { api.proxy() } returns proxy
+            every { proxy.history() } returns listOf(item)
+
+            runBlocking {
+                val result = client.callTool("set_proxy_history_notes", mapOf(
+                    "historyId" to 999, "notes" to "Do not store"
+                )).expectTextContent()
+                assertTrue(result.contains("No Proxy HTTP history item found with ID 999"))
+                assertEquals("Preserve me", annotations.notes())
+                verify(exactly = 0) { annotations.setNotes(any()) }
+                verify(exactly = 0) { api.http() }
+                verify(exactly = 0) { api.repeater() }
+                verify(exactly = 0) { api.intruder() }
+            }
+        }
+
+        @Test
+        fun `set proxy history notes denied access does not modify notes`() {
+            val previousHandler = DataAccessSecurity.approvalHandler
+            val denyingHandler = mockk<DataAccessApprovalHandler>()
+            val proxy = mockk<Proxy>()
+            val item = historyItem(101, "https://one.test/", initialNotes = "Preserve me")
+            val annotations = item.annotations()
+            DataAccessSecurity.approvalHandler = denyingHandler
+            dataAccessApprovalRequired = true
+            coEvery { denyingHandler.requestDataAccess(DataAccessType.HTTP_HISTORY, config) } returns false
+            every { api.proxy() } returns proxy
+            every { proxy.history() } returns listOf(item)
+            try {
+                runBlocking {
+                    assertEquals("HTTP history access denied by Burp Suite", client.callTool(
+                        "set_proxy_history_notes", mapOf("historyId" to 101, "notes" to "Denied note")
+                    ).expectTextContent())
+                    assertEquals("Preserve me", annotations.notes())
+                    verify(exactly = 0) { annotations.setNotes(any()) }
+                    verify(exactly = 0) { api.proxy() }
+                    verify(exactly = 0) { api.http() }
+                    verify(exactly = 0) { api.repeater() }
+                    verify(exactly = 0) { api.intruder() }
                 }
             } finally {
                 dataAccessApprovalRequired = false
