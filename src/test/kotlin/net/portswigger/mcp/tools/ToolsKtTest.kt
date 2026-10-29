@@ -14,6 +14,7 @@ import burp.api.montoya.http.message.HttpHeader
 import burp.api.montoya.http.message.HttpRequestResponse as MontoyaHttpRequestResponse
 import burp.api.montoya.http.message.requests.HttpRequest
 import burp.api.montoya.http.message.responses.HttpResponse
+import burp.api.montoya.intruder.Intruder
 import burp.api.montoya.organizer.Organizer
 import burp.api.montoya.organizer.OrganizerItem
 import burp.api.montoya.organizer.OrganizerItemFilter
@@ -1072,6 +1073,133 @@ class ToolsKtTest {
                     ).expectTextContent())
                     verify(exactly = 0) { api.repeater() }
                     verify(exactly = 0) { api.http() }
+                }
+            } finally {
+                dataAccessApprovalRequired = false
+                DataAccessSecurity.approvalHandler = previousHandler
+            }
+        }
+
+        @Test
+        fun `send proxy history to intruder uses official ID and final request with safe output`() {
+            val proxy = mockk<Proxy>()
+            val intruder = mockk<Intruder>(relaxed = true)
+            val other = historyItem(15, "https://other.test/?token=OTHER_SECRET")
+            val selected = historyItem(
+                9026,
+                "https://shop.test/rest/products/search?q=QUERY_SECRET",
+                initialNotes = "NOTES_SECRET",
+                initialHighlight = HighlightColor.CYAN
+            )
+            val finalRequest = mockk<HttpRequest>()
+            every { selected.finalRequest() } returns finalRequest
+            every { finalRequest.toString() } returns "GET /?token=TOKEN_SECRET HTTP/1.1\r\nAuthorization: AUTH_SECRET\r\nCookie: COOKIE_SECRET\r\n\r\nBODY_SECRET"
+            every { api.proxy() } returns proxy
+            every { proxy.history() } returns listOf(other, selected)
+            every { api.intruder() } returns intruder
+
+            runBlocking {
+                val text = client.callTool("send_proxy_history_to_intruder", mapOf(
+                    "historyId" to 9026, "tabName" to "MCP History Intruder validation"
+                )).expectTextContent()
+
+                assertEquals(
+                    "Opened Proxy history item 9026 in Intruder tab 'MCP History Intruder validation'. No Intruder attack was started and no HTTP request was transmitted.",
+                    text
+                )
+                assertFalse(text.contains("shop.test"))
+                assertFalse(text.contains("QUERY_SECRET"))
+                assertFalse(text.contains("TOKEN_SECRET"))
+                assertFalse(text.contains("AUTH_SECRET"))
+                assertFalse(text.contains("COOKIE_SECRET"))
+                assertFalse(text.contains("BODY_SECRET"))
+                assertFalse(text.contains("NOTES_SECRET"))
+                verify(exactly = 1) { other.id() }
+                verify(exactly = 1) { selected.id() }
+                verify(exactly = 1) { selected.finalRequest() }
+                verify(exactly = 0) { selected.request() }
+                verify(exactly = 1) { intruder.sendToIntruder(finalRequest, "MCP History Intruder validation") }
+                verify(exactly = 0) { api.http() }
+                verify(exactly = 0) { api.repeater() }
+                verify(exactly = 0) { api.organizer() }
+                verify(exactly = 0) { proxy.enableIntercept() }
+                verify(exactly = 0) { proxy.disableIntercept() }
+            }
+        }
+
+        @Test
+        fun `send proxy history to intruder falls back to request and defaults tab name`() {
+            val proxy = mockk<Proxy>()
+            val intruder = mockk<Intruder>(relaxed = true)
+            val item = historyItem(62, "https://shop.test/safe")
+            val request = item.request()
+            every { item.finalRequest() } returns null
+            every { api.proxy() } returns proxy
+            every { proxy.history() } returns listOf(item)
+            every { api.intruder() } returns intruder
+
+            runBlocking {
+                val omitted = client.callTool("send_proxy_history_to_intruder", mapOf(
+                    "historyId" to 62
+                )).expectTextContent()
+                val blank = client.callTool("send_proxy_history_to_intruder", mapOf(
+                    "historyId" to 62, "tabName" to "  "
+                )).expectTextContent()
+
+                assertTrue(omitted.contains("History 62"))
+                assertTrue(blank.contains("History 62"))
+                assertTrue(omitted.contains("No Intruder attack was started"))
+                assertTrue(omitted.contains("no HTTP request was transmitted"))
+                verify(exactly = 2) { item.finalRequest() }
+                verify(exactly = 3) { item.request() }
+                verify(exactly = 2) { intruder.sendToIntruder(request, "History 62") }
+                verify(exactly = 0) { api.http() }
+                verify(exactly = 0) { api.repeater() }
+                verify(exactly = 0) { api.organizer() }
+            }
+        }
+
+        @Test
+        fun `send proxy history to intruder handles unknown ID and missing request without opening`() {
+            val proxy = mockk<Proxy>()
+            val item = mockk<ProxyHttpRequestResponse>()
+            every { item.id() } returns 71
+            every { item.finalRequest() } returns null
+            every { item.request() } returns null
+            every { api.proxy() } returns proxy
+            every { proxy.history() } returns listOf(item)
+
+            runBlocking {
+                assertEquals("No Proxy HTTP history item found with ID 72", client.callTool(
+                    "send_proxy_history_to_intruder", mapOf("historyId" to 72)
+                ).expectTextContent())
+                assertTrue(client.callTool("send_proxy_history_to_intruder", mapOf(
+                    "historyId" to 71
+                )).expectTextContent().contains("has no request to open in Intruder"))
+                verify(exactly = 0) { api.intruder() }
+                verify(exactly = 0) { api.http() }
+                verify(exactly = 0) { api.repeater() }
+                verify(exactly = 0) { api.organizer() }
+            }
+        }
+
+        @Test
+        fun `send proxy history to intruder access denial prevents lookup and opening`() {
+            val previousHandler = DataAccessSecurity.approvalHandler
+            val denyingHandler = mockk<DataAccessApprovalHandler>()
+            DataAccessSecurity.approvalHandler = denyingHandler
+            dataAccessApprovalRequired = true
+            coEvery { denyingHandler.requestDataAccess(DataAccessType.HTTP_HISTORY, config) } returns false
+            try {
+                runBlocking {
+                    assertEquals("HTTP history access denied by Burp Suite", client.callTool(
+                        "send_proxy_history_to_intruder", mapOf("historyId" to 81)
+                    ).expectTextContent())
+                    verify(exactly = 0) { api.proxy() }
+                    verify(exactly = 0) { api.intruder() }
+                    verify(exactly = 0) { api.http() }
+                    verify(exactly = 0) { api.repeater() }
+                    verify(exactly = 0) { api.organizer() }
                 }
             } finally {
                 dataAccessApprovalRequired = false

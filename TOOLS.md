@@ -38,4 +38,4 @@
 | `get_organizer_items_summary` | Paginated compact Organizer metadata with optional regex filtering | ❌ | ✅ | Uses Montoya Organizer items and official ID/status/annotation/request/response metadata; regex filters before pagination | ✅ |
 | `get_organizer_item` | Read one size-limited Organizer item by official Montoya ID | ❌ | ✅ | Finds `OrganizerItem.id()` and uses existing bounded history-item serialization | ✅ |
 | `send_organizer_item_to_repeater` | Open one Organizer request in Repeater without transmitting it | ❌ | ✅ | Find the item by `OrganizerItem.id()` and pass its original `request()` directly to Montoya Repeater | ✅ |
-
+| `send_proxy_history_to_intruder` | Open a Proxy history request in Intruder without starting an attack | ❌ | ✅ | Find by `ProxyHttpRequestResponse.id()`, prefer `finalRequest()`, fall back to `request()`, and pass the original request to Montoya Intruder | ✅ |
