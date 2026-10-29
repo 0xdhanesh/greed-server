@@ -2053,6 +2053,136 @@ class ToolsKtTest {
         }
 
         @Test
+        fun `organizer item to intruder uses official ID and exact request with safe explicit tab`() {
+            val organizer = mockk<Organizer>()
+            val intruder = mockk<Intruder>(relaxed = true)
+            val other = organizerItem(80, "https://other.test/?token=OTHER_QUERY_SECRET")
+            val selected = organizerItem(
+                903,
+                "https://shop.test/rest/admin/application-version?token=URL_SECRET",
+                status = OrganizerItemStatus.DONE,
+                notes = "ORGANIZER_NOTE_SECRET",
+                highlight = HighlightColor.CYAN,
+                requestText = "GET /rest/admin/application-version?token=HEADER_SECRET HTTP/1.1\r\nAuthorization: AUTH_SECRET\r\nCookie: COOKIE_SECRET\r\n\r\nBODY_SECRET"
+            )
+            val request = selected.request()
+            val annotations = selected.annotations()
+            every { api.organizer() } returns organizer
+            every { organizer.items() } returns listOf(other, selected)
+            every { api.intruder() } returns intruder
+
+            runBlocking {
+                val text = client.callTool("send_organizer_item_to_intruder", mapOf(
+                    "organizerId" to 903, "tabName" to "MCP Organizer Intruder validation"
+                )).expectTextContent()
+
+                assertEquals(
+                    "Opened Organizer item 903 in Intruder tab 'MCP Organizer Intruder validation'. No Intruder attack was started and no HTTP request was transmitted.",
+                    text
+                )
+                assertFalse(text.contains("shop.test"))
+                assertFalse(text.contains("URL_SECRET"))
+                assertFalse(text.contains("HEADER_SECRET"))
+                assertFalse(text.contains("AUTH_SECRET"))
+                assertFalse(text.contains("COOKIE_SECRET"))
+                assertFalse(text.contains("BODY_SECRET"))
+                assertFalse(text.contains("ORGANIZER_NOTE_SECRET"))
+                verify(exactly = 1) { other.id() }
+                verify(exactly = 1) { selected.id() }
+                verify(exactly = 2) { selected.request() }
+                verify(exactly = 1) { intruder.sendToIntruder(request, "MCP Organizer Intruder validation") }
+                assertEquals(OrganizerItemStatus.DONE, selected.status())
+                verify(exactly = 0) { annotations.setNotes(any()) }
+                verify(exactly = 0) { annotations.setHighlightColor(any()) }
+                verify(exactly = 0) { api.http() }
+                verify(exactly = 0) { api.repeater() }
+                verify(exactly = 0) { api.proxy() }
+                verify(exactly = 0) { organizer.sendToOrganizer(any<HttpRequest>()) }
+                verify(exactly = 0) { organizer.sendToOrganizer(any<MontoyaHttpRequestResponse>()) }
+            }
+        }
+
+        @Test
+        fun `organizer item to intruder defaults omitted and blank tab names`() {
+            val organizer = mockk<Organizer>()
+            val intruder = mockk<Intruder>(relaxed = true)
+            val item = organizerItem(78, "https://shop.test/")
+            val request = item.request()
+            every { api.organizer() } returns organizer
+            every { organizer.items() } returns listOf(item)
+            every { api.intruder() } returns intruder
+
+            runBlocking {
+                val omitted = client.callTool("send_organizer_item_to_intruder", mapOf(
+                    "organizerId" to 78
+                )).expectTextContent()
+                val blank = client.callTool("send_organizer_item_to_intruder", mapOf(
+                    "organizerId" to 78, "tabName" to "  "
+                )).expectTextContent()
+
+                assertTrue(omitted.contains("Organizer 78"))
+                assertTrue(blank.contains("Organizer 78"))
+                assertTrue(omitted.contains("No Intruder attack was started"))
+                assertTrue(omitted.contains("no HTTP request was transmitted"))
+                verify(exactly = 2) { intruder.sendToIntruder(request, "Organizer 78") }
+                verify(exactly = 0) { api.http() }
+                verify(exactly = 0) { api.repeater() }
+                verify(exactly = 0) { api.proxy() }
+                verify(exactly = 0) { organizer.sendToOrganizer(any<HttpRequest>()) }
+                verify(exactly = 0) { organizer.sendToOrganizer(any<MontoyaHttpRequestResponse>()) }
+            }
+        }
+
+        @Test
+        fun `organizer item to intruder unknown ID and missing request do not open Intruder`() {
+            val organizer = mockk<Organizer>()
+            val item = mockk<OrganizerItem>()
+            every { item.id() } returns 99
+            every { item.request() } returns null
+            every { api.organizer() } returns organizer
+            every { organizer.items() } returns listOf(item)
+
+            runBlocking {
+                assertEquals("No Organizer item found with ID 100", client.callTool(
+                    "send_organizer_item_to_intruder", mapOf("organizerId" to 100)
+                ).expectTextContent())
+                assertTrue(client.callTool("send_organizer_item_to_intruder", mapOf(
+                    "organizerId" to 99
+                )).expectTextContent().contains("has no request to open in Intruder"))
+                verify(exactly = 0) { api.intruder() }
+                verify(exactly = 0) { api.http() }
+                verify(exactly = 0) { api.repeater() }
+                verify(exactly = 0) { api.proxy() }
+                verify(exactly = 0) { organizer.sendToOrganizer(any<HttpRequest>()) }
+                verify(exactly = 0) { organizer.sendToOrganizer(any<MontoyaHttpRequestResponse>()) }
+            }
+        }
+
+        @Test
+        fun `organizer item to intruder access denial prevents lookup and opening`() {
+            val previousHandler = DataAccessSecurity.approvalHandler
+            val denyingHandler = mockk<DataAccessApprovalHandler>()
+            DataAccessSecurity.approvalHandler = denyingHandler
+            dataAccessApprovalRequired = true
+            coEvery { denyingHandler.requestDataAccess(DataAccessType.ORGANIZER, config) } returns false
+            try {
+                runBlocking {
+                    assertEquals("Organizer access denied by Burp Suite", client.callTool(
+                        "send_organizer_item_to_intruder", mapOf("organizerId" to 123)
+                    ).expectTextContent())
+                    verify(exactly = 0) { api.organizer() }
+                    verify(exactly = 0) { api.intruder() }
+                    verify(exactly = 0) { api.http() }
+                    verify(exactly = 0) { api.repeater() }
+                    verify(exactly = 0) { api.proxy() }
+                }
+            } finally {
+                dataAccessApprovalRequired = false
+                DataAccessSecurity.approvalHandler = previousHandler
+            }
+        }
+
+        @Test
         fun `get proxy history should paginate properly`() {
             val proxy = mockk<Proxy>()
             val proxyHistory = listOf(

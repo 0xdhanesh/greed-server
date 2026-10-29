@@ -574,6 +574,26 @@ fun Server.registerTools(api: MontoyaApi, config: McpConfig) {
         "Opened Organizer item $organizerId in Repeater tab '$resolvedTabName'. Request was not transmitted."
     }
 
+    mcpTool<SendOrganizerItemToIntruder>(
+        "Opens the request from one Burp Organizer item in Intruder using its official Montoya Organizer ID. The tool does not start an Intruder attack, transmit the request, or modify the Organizer item."
+    ) {
+        val allowed = checkDataAccessOrDeny(DataAccessType.ORGANIZER, config, api, "Organizer")
+        if (!allowed) {
+            return@mcpTool "Organizer access denied by Burp Suite"
+        }
+
+        val item = findOrganizerItem(api, organizerId)
+            ?: return@mcpTool "No Organizer item found with ID $organizerId"
+        val request = item.request()
+            ?: return@mcpTool "Organizer item $organizerId has no request to open in Intruder"
+        val resolvedTabName = tabName?.takeIf { it.isNotBlank() } ?: "Organizer $organizerId"
+
+        api.intruder().sendToIntruder(request, resolvedTabName)
+        api.logging().logToOutput("Opened Organizer item $organizerId in Intruder; attack not started and request not transmitted")
+
+        "Opened Organizer item $organizerId in Intruder tab '$resolvedTabName'. No Intruder attack was started and no HTTP request was transmitted."
+    }
+
     mcpPaginatedTool<GetProxyWebsocketHistory>("Displays items within the proxy WebSocket history") {
         val allowed = checkDataAccessOrDeny(DataAccessType.WEBSOCKET_HISTORY, config, api, "WebSocket history")
         if (!allowed) {
@@ -792,6 +812,9 @@ data class GetOrganizerItem(val organizerId: Int)
 
 @Serializable
 data class SendOrganizerItemToRepeater(val organizerId: Int, val tabName: String? = null)
+
+@Serializable
+data class SendOrganizerItemToIntruder(val organizerId: Int, val tabName: String? = null)
 
 @Serializable
 data class OrganizerItemSummary(

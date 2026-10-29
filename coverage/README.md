@@ -1,5 +1,12 @@
 # Changes
 
+Changes made during each commit - to keep track of the functionality and to plan future implementations.
+
+---
+need_to_implement: sending request in repeater, adding markers in intruder operations
+
+---
+
 ## 29.10.2026
 
 **feat(tools): add proxy HTTP history summary and lookup**
@@ -96,6 +103,8 @@
 | --------------------- | -------------------- |
 | ![Claude Organizer lookup validation](./assets/29_10_26_get_organizer_items_summary.png) | ![Organizer item verified in Burp](./assets/29_10_26_get_organizer_items_summary1.png) |
 
+## 30.10.2026
+
 **feat(tools): open Organizer requests in Repeater**
 
 - A request saved in Burp Organizer can be opened in Repeater using its official Montoya Organizer ID.
@@ -132,3 +141,23 @@
 | Claude Console output | Burp Suite Intruder |
 | --------------------- | ------------------- |
 | ![Claude Proxy history Intruder validation](./assets/30_10_26_send_proxy_history_to_intruder.png) | ![Proxy history request opened in Intruder](./assets/30_10_26_send_proxy_history_to_intruder1.png) |
+
+**feat(tools): open Organizer requests in Intruder**
+
+- A request saved in Burp Organizer can be opened in Intruder using its official Montoya Organizer ID.
+- Organizer access approval is required before an item is read or opened.
+- The original Organizer request is transferred directly through Montoya without serialization or reconstruction.
+- Explicit Intruder tab names are supported and passed unchanged.
+- Omitted or blank tab names use the default `Organizer <organizerId>` format.
+- Unknown Organizer IDs return a clear error without creating an Intruder tab.
+- Missing requests return a controlled error without opening Intruder.
+- Tool results and logs do not expose HTTP contents, notes, cookies, tokens or authorization data.
+- Opening the request in Intruder does not transmit the HTTP request.
+- Opening the request does not configure payloads or start an Intruder attack.
+- The source Organizer item, its annotations and its status remain unchanged.
+- Proxy history remains unchanged, and no Repeater or additional Organizer side effects are created.
+- The Organizer response is not transferred because Intruder receives only the saved request.
+
+| Claude Console output | Burp Suite Intruder |
+| --------------------- | ------------------- |
+| ![Claude Organizer Intruder validation](./assets/30_10_26_send_organizer_item_to_intruder.png) | ![Organizer request opened in Intruder](./assets/30_10_26_send_organizer_item_to_intruder1.png) |
