@@ -554,6 +554,34 @@ fun Server.registerTools(api: MontoyaApi, config: McpConfig) {
         encodeHistoryItem(item.toSerializableForm())
     }
 
+    mcpTool<SetOrganizerItemNotes>(
+        "Appends or replaces notes on one Burp Organizer item selected by its official Montoya Organizer ID. Appending is the default."
+    ) {
+        if (notes.isBlank()) {
+            throw IllegalArgumentException("Notes must not be blank")
+        }
+
+        val allowed = checkDataAccessOrDeny(DataAccessType.ORGANIZER, config, api, "Organizer")
+        if (!allowed) {
+            return@mcpTool "Organizer access denied by Burp Suite"
+        }
+
+        val item = findOrganizerItem(api, organizerId)
+            ?: return@mcpTool "No Organizer item found with ID $organizerId"
+        val annotations = item.annotations()
+        val operation = if (append) {
+            val existingNotes = annotations.notes()
+            annotations.setNotes(if (existingNotes.isNotBlank()) "$existingNotes\n$notes" else notes)
+            "appended"
+        } else {
+            annotations.setNotes(notes)
+            "replaced"
+        }
+
+        api.logging().logToOutput("$operation notes on Organizer item $organizerId")
+        "Notes $operation on Organizer item $organizerId"
+    }
+
     mcpTool<SendOrganizerItemToRepeater>(
         "Opens the request from one Burp Organizer item in Repeater using its official Montoya Organizer ID. The request is opened for inspection and is not transmitted."
     ) {
@@ -809,6 +837,9 @@ data class GetOrganizerItemsSummary(
 
 @Serializable
 data class GetOrganizerItem(val organizerId: Int)
+
+@Serializable
+data class SetOrganizerItemNotes(val organizerId: Int, val notes: String, val append: Boolean = true)
 
 @Serializable
 data class SendOrganizerItemToRepeater(val organizerId: Int, val tabName: String? = null)
