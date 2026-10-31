@@ -183,3 +183,26 @@ need_to_implement: sending request in repeater, adding markers in intruder opera
 | Claude Console output | Burp Suite Organizer |
 | --------------------- | -------------------- |
 | ![Claude Organizer notes validation](./assets/31_10_26_set_organizer_item_notes.png) | ![Organizer item notes updated](./assets/31_10_26_set_organizer_item_notes1.png) |
+
+**feat(tools): add Proxy WebSocket history summary and lookup**
+
+- Compact Proxy WebSocket history summaries can be retrieved without exposing complete message payloads or upgrade requests.
+- Summaries include the official Montoya message ID, WebSocket connection ID, timestamp, direction, listener port, effective payload length, edited state, notes and highlight color.
+- WebSocket summaries support optional Java regular-expression filtering.
+- Regex filtering is applied to message payloads before pagination.
+- Individual WebSocket messages can be retrieved using their official Montoya message ID.
+- Unknown message IDs return a clear error without returning a different item.
+- Invalid regular expressions return a controlled error without disconnecting the MCP client.
+- Exact-item results use the existing size-limited serializer, and large payloads may be truncated.
+- Both tools require WebSocket-history access approval.
+- Both tools are read-only and do not modify messages, notes or highlights.
+- Retrieving WebSocket history does not transmit an HTTP request or WebSocket message.
+- Retrieving WebSocket history does not create a WebSocket connection or modify Repeater, Intruder, Organizer or Comparer.
+- Live validation covered at least 100 history messages and confirmed exact lookup for message ID 3 on WebSocket connection 1.
+- Edited-payload behavior was not live-tested because no safe message with `edited: true` was available.
+- Permission-denial behavior was not live-tested.
+
+| Claude Console output | Burp Suite WebSocket history |
+| --------------------- | ---------------------------- |
+| ![Claude WebSocket history validation](./assets/31_10_26_get_proxy_websocket_history_item.png) | ![WebSocket history item verified in Burp](./assets/31_10_26_get_proxy_websocket_history_item1.png) |
+

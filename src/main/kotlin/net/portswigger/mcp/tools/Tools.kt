@@ -699,6 +699,50 @@ fun Server.registerTools(api: MontoyaApi, config: McpConfig) {
             .map { encodeHistoryItem(it.toSerializableForm()) }
     }
 
+    mcpPaginatedTool<GetProxyWebsocketHistorySummary>(
+        "Returns compact, read-only Proxy WebSocket history metadata by official message ID. Optional Java regex filtering is applied before pagination; summaries omit payloads and upgrade request contents."
+    ) {
+        val allowed = checkDataAccessOrDeny(DataAccessType.WEBSOCKET_HISTORY, config, api, "WebSocket history")
+        if (!allowed) {
+            return@mcpPaginatedTool sequenceOf("WebSocket history access denied by Burp Suite")
+        }
+
+        val compiledRegex = regex?.let(Pattern::compile)
+        api.proxy().webSocketHistory().asSequence()
+            .filter { compiledRegex == null || it.contains(compiledRegex) }
+            .map { item ->
+                val editedPayload = item.editedPayload()
+                val payloadLength = (editedPayload ?: item.payload())?.length() ?: 0
+                val annotations = item.annotations()
+                Json.encodeToString(
+                    ProxyWebsocketHistorySummary(
+                        messageId = item.id(),
+                        webSocketId = item.webSocketId(),
+                        timestamp = item.time().toString(),
+                        direction = item.direction().name,
+                        listenerPort = item.listenerPort(),
+                        payloadLength = payloadLength,
+                        edited = editedPayload != null,
+                        notes = annotations.notes() ?: "",
+                        highlightColor = if (annotations.hasHighlightColor()) annotations.highlightColor().name else "NONE"
+                    )
+                )
+            }
+    }
+
+    mcpTool<GetProxyWebsocketHistoryItem>(
+        "Returns one size-limited Proxy WebSocket history item by its official Montoya message ID. The shared serializer returns the original payload; large payload fields may be truncated. Read-only; no messages are transmitted."
+    ) {
+        val allowed = checkDataAccessOrDeny(DataAccessType.WEBSOCKET_HISTORY, config, api, "WebSocket history")
+        if (!allowed) {
+            return@mcpTool "WebSocket history access denied by Burp Suite"
+        }
+
+        val item = api.proxy().webSocketHistory().firstOrNull { it.id() == messageId }
+            ?: return@mcpTool "No Proxy WebSocket history item found with ID $messageId"
+        encodeHistoryItem(item.toSerializableForm())
+    }
+
     mcpTool<SetTaskExecutionEngineState>("Sets the state of Burp's task execution engine (paused or unpaused)") {
         api.burpSuite().taskExecutionEngine().state = if (running) RUNNING else PAUSED
 
@@ -932,6 +976,29 @@ data class GetProxyWebsocketHistory(override val count: Int, override val offset
 @Serializable
 data class GetProxyWebsocketHistoryRegex(val regex: String, override val count: Int, override val offset: Int) :
     Paginated
+
+@Serializable
+data class GetProxyWebsocketHistorySummary(
+    override val count: Int,
+    override val offset: Int,
+    val regex: String? = null
+) : Paginated
+
+@Serializable
+data class GetProxyWebsocketHistoryItem(val messageId: Int)
+
+@Serializable
+data class ProxyWebsocketHistorySummary(
+    val messageId: Int,
+    val webSocketId: Int,
+    val timestamp: String,
+    val direction: String,
+    val listenerPort: Int,
+    val payloadLength: Int,
+    val edited: Boolean,
+    val notes: String,
+    val highlightColor: String
+)
 
 @Serializable
 data class GenerateCollaboratorPayload(

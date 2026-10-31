@@ -28,6 +28,7 @@ import burp.api.montoya.logging.Logging
 import burp.api.montoya.persistence.PersistedObject
 import burp.api.montoya.proxy.Proxy
 import burp.api.montoya.proxy.ProxyHttpRequestResponse
+import burp.api.montoya.proxy.ProxyWebSocketMessage
 import burp.api.montoya.utilities.Base64Utils
 import burp.api.montoya.utilities.RandomUtils
 import burp.api.montoya.utilities.URLUtils
@@ -37,6 +38,8 @@ import io.mockk.coEvery
 import java.net.InetAddress
 import java.time.ZonedDateTime
 import java.util.Optional
+import java.util.regex.Pattern
+import burp.api.montoya.websocket.Direction
 import io.modelcontextprotocol.kotlin.sdk.types.CallToolResult
 import io.modelcontextprotocol.kotlin.sdk.types.TextContent
 import kotlinx.coroutines.delay
@@ -847,6 +850,48 @@ class ToolsKtTest {
                 notes = "test note"
             )
             return item
+        }
+
+        private fun websocketMessage(
+            id: Int,
+            webSocketId: Int,
+            payloadText: String,
+            editedPayloadText: String? = null,
+            direction: Direction = Direction.CLIENT_TO_SERVER,
+            listenerPort: Int = 8080,
+            notes: String = "",
+            highlight: HighlightColor? = null,
+            time: ZonedDateTime = ZonedDateTime.parse("2026-10-31T12:00:00Z"),
+            upgradeRequestText: String = "GET /socket HTTP/1.1"
+        ): ProxyWebSocketMessage {
+            val message = mockk<ProxyWebSocketMessage>()
+            val payload = mockk<ByteArray>()
+            val editedPayload = editedPayloadText?.let { mockk<ByteArray>() }
+            val upgradeRequest = mockk<HttpRequest>()
+            val annotations = mockk<Annotations>()
+            every { payload.length() } returns payloadText.length
+            every { payload.toString() } returns payloadText
+            editedPayload?.let {
+                every { it.length() } returns editedPayloadText!!.length
+                every { it.toString() } returns editedPayloadText
+            }
+            every { upgradeRequest.toString() } returns upgradeRequestText
+            every { annotations.notes() } returns notes
+            every { annotations.hasHighlightColor() } returns (highlight != null)
+            every { annotations.highlightColor() } returns (highlight ?: HighlightColor.NONE)
+            every { message.id() } returns id
+            every { message.webSocketId() } returns webSocketId
+            every { message.time() } returns time
+            every { message.direction() } returns direction
+            every { message.listenerPort() } returns listenerPort
+            every { message.payload() } returns payload
+            every { message.editedPayload() } returns editedPayload
+            every { message.upgradeRequest() } returns upgradeRequest
+            every { message.annotations() } returns annotations
+            every { message.contains(any<Pattern>()) } answers {
+                firstArg<Pattern>().matcher(payloadText).find()
+            }
+            return message
         }
 
         @Test
@@ -2750,6 +2795,214 @@ class ToolsKtTest {
                 unmockkStatic(HttpRequestTemplate::class)
                 dataAccessApprovalRequired = false
                 DataAccessSecurity.approvalHandler = previousHandler
+            }
+        }
+
+        @Test
+        fun `WebSocket summary returns compact official metadata and effective edited payload length`() {
+            val proxy = mockk<Proxy>()
+            val logging = mockk<Logging>(relaxed = true)
+            val logMessages = mutableListOf<String>()
+            val message = websocketMessage(
+                id = 123,
+                webSocketId = 7,
+                payloadText = "ORIGINAL_PAYLOAD_SECRET",
+                editedPayloadText = "EDITED_PAYLOAD_SECRET",
+                direction = Direction.SERVER_TO_CLIENT,
+                listenerPort = 8080,
+                notes = "Reviewed finding",
+                highlight = HighlightColor.YELLOW,
+                upgradeRequestText = "GET /SECRET_URL?token=TOKEN_SECRET HTTP/1.1\r\nCookie: COOKIE_SECRET\r\nAuthorization: AUTH_SECRET"
+            )
+            val annotations = message.annotations()
+            every { api.proxy() } returns proxy
+            every { proxy.webSocketHistory() } returns listOf(message)
+            every { api.logging() } returns logging
+            every { logging.logToOutput(capture(logMessages)) } just runs
+
+            runBlocking {
+                val result = client.callTool("get_proxy_websocket_history_summary", mapOf(
+                    "count" to 1, "offset" to 0
+                )).expectTextContent()
+                val item = Json.parseToJsonElement(result).jsonObject
+
+                assertEquals("123", item.getValue("messageId").jsonPrimitive.content)
+                assertEquals("7", item.getValue("webSocketId").jsonPrimitive.content)
+                assertEquals("2026-10-31T12:00Z", item.getValue("timestamp").jsonPrimitive.content)
+                assertEquals("SERVER_TO_CLIENT", item.getValue("direction").jsonPrimitive.content)
+                assertEquals("8080", item.getValue("listenerPort").jsonPrimitive.content)
+                assertEquals("EDITED_PAYLOAD_SECRET".length.toString(), item.getValue("payloadLength").jsonPrimitive.content)
+                assertEquals("true", item.getValue("edited").jsonPrimitive.content)
+                assertEquals("Reviewed finding", item.getValue("notes").jsonPrimitive.content)
+                assertEquals("YELLOW", item.getValue("highlightColor").jsonPrimitive.content)
+                listOf("ORIGINAL_PAYLOAD_SECRET", "EDITED_PAYLOAD_SECRET", "SECRET_URL", "TOKEN_SECRET", "COOKIE_SECRET", "AUTH_SECRET")
+                    .forEach { secret ->
+                        assertFalse(result.contains(secret))
+                        assertFalse(logMessages.joinToString(" ").contains(secret))
+                    }
+                verify(exactly = 0) { api.http() }
+                verify(exactly = 0) { api.websockets() }
+                verify(exactly = 0) { api.repeater() }
+                verify(exactly = 0) { api.intruder() }
+                verify(exactly = 0) { api.organizer() }
+                verify(exactly = 0) { proxy.enableIntercept() }
+                verify(exactly = 0) { proxy.disableIntercept() }
+                verify(exactly = 0) { annotations.setNotes(any()) }
+                verify(exactly = 0) { annotations.setHighlightColor(any()) }
+            }
+        }
+
+        @Test
+        fun `WebSocket summary reports original length and NONE highlight when not edited`() {
+            val proxy = mockk<Proxy>()
+            val message = websocketMessage(
+                id = 124,
+                webSocketId = 8,
+                payloadText = "ORIGINAL_ONLY_SECRET",
+                editedPayloadText = null,
+                direction = Direction.CLIENT_TO_SERVER,
+                highlight = null
+            )
+            every { api.proxy() } returns proxy
+            every { proxy.webSocketHistory() } returns listOf(message)
+
+            runBlocking {
+                val result = client.callTool("get_proxy_websocket_history_summary", mapOf(
+                    "count" to 1, "offset" to 0
+                )).expectTextContent()
+                val item = Json.parseToJsonElement(result).jsonObject
+                assertEquals("ORIGINAL_ONLY_SECRET".length.toString(), item.getValue("payloadLength").jsonPrimitive.content)
+                assertEquals("false", item.getValue("edited").jsonPrimitive.content)
+                assertEquals("NONE", item.getValue("highlightColor").jsonPrimitive.content)
+                assertFalse(result.contains("ORIGINAL_ONLY_SECRET"))
+            }
+        }
+
+        @Test
+        fun `WebSocket summary paginates and applies official contains regex before pagination`() {
+            val proxy = mockk<Proxy>()
+            val first = websocketMessage(201, 1, "MATCH first")
+            val skipped = websocketMessage(202, 1, "does not match")
+            val secondMatch = websocketMessage(203, 2, "MATCH second")
+            every { api.proxy() } returns proxy
+            every { proxy.webSocketHistory() } returns listOf(first, skipped, secondMatch)
+
+            runBlocking {
+                val unfilteredPage = client.callTool("get_proxy_websocket_history_summary", mapOf(
+                    "count" to 1, "offset" to 1
+                )).expectTextContent()
+                val filteredPage = client.callTool("get_proxy_websocket_history_summary", mapOf(
+                    "count" to 1, "offset" to 1, "regex" to "MATCH"
+                )).expectTextContent()
+                val noMatches = client.callTool("get_proxy_websocket_history_summary", mapOf(
+                    "count" to 1, "offset" to 0, "regex" to "NO_MATCH"
+                )).expectTextContent()
+
+                assertTrue(unfilteredPage.contains("\"messageId\":202"), unfilteredPage)
+                assertTrue(filteredPage.contains("\"messageId\":203"), filteredPage)
+                assertFalse(filteredPage.contains("\"messageId\":202"))
+                assertEquals("Reached end of items", noMatches)
+                verify(atLeast = 1) { first.contains(any<Pattern>()) }
+                verify(atLeast = 1) { skipped.contains(any<Pattern>()) }
+                verify(atLeast = 1) { secondMatch.contains(any<Pattern>()) }
+            }
+        }
+
+        @Test
+        fun `WebSocket invalid regex returns controlled error and leaves MCP connection usable`() {
+            val proxy = mockk<Proxy>()
+            val message = websocketMessage(301, 9, "safe payload")
+            every { api.proxy() } returns proxy
+            every { proxy.webSocketHistory() } returns listOf(message)
+
+            runBlocking {
+                val invalid = client.callTool("get_proxy_websocket_history_summary", mapOf(
+                    "count" to 1, "offset" to 0, "regex" to "["
+                ))
+                assertTrue(invalid?.isError ?: false)
+                assertTrue((invalid?.content?.firstOrNull() as? TextContent)?.text.orEmpty().contains("Unclosed"))
+                verify(exactly = 0) { proxy.webSocketHistory() }
+
+                val valid = client.callTool("get_proxy_websocket_history_summary", mapOf(
+                    "count" to 1, "offset" to 0, "regex" to "safe"
+                )).expectTextContent()
+                assertTrue(valid.contains("\"messageId\":301"))
+                assertNotNull(client.ping())
+            }
+        }
+
+        @Test
+        fun `WebSocket history approval denial prevents lookup for both tools`() {
+            val previousHandler = DataAccessSecurity.approvalHandler
+            val denyingHandler = mockk<DataAccessApprovalHandler>()
+            DataAccessSecurity.approvalHandler = denyingHandler
+            dataAccessApprovalRequired = true
+            coEvery { denyingHandler.requestDataAccess(DataAccessType.WEBSOCKET_HISTORY, config) } returns false
+            try {
+                runBlocking {
+                    assertEquals("WebSocket history access denied by Burp Suite", client.callTool(
+                        "get_proxy_websocket_history_summary", mapOf("count" to 1, "offset" to 0)
+                    ).expectTextContent())
+                    assertEquals("WebSocket history access denied by Burp Suite", client.callTool(
+                        "get_proxy_websocket_history_item", mapOf("messageId" to 1)
+                    ).expectTextContent())
+                    verify(exactly = 0) { api.proxy() }
+                }
+            } finally {
+                dataAccessApprovalRequired = false
+                DataAccessSecurity.approvalHandler = previousHandler
+            }
+        }
+
+        @Test
+        fun `WebSocket exact lookup uses official ID, original payload and shared size limit`() {
+            unmockkStatic("net.portswigger.mcp.schema.SerializationKt")
+            val proxy = mockk<Proxy>()
+            val other = websocketMessage(401, 20, "OTHER_ITEM_SECRET")
+            val selected = websocketMessage(
+                id = 9876,
+                webSocketId = 21,
+                payloadText = "ORIGINAL_SELECTED_PAYLOAD",
+                editedPayloadText = "EDITED_SELECTED_PAYLOAD"
+            )
+            val annotations = selected.annotations()
+            every { api.proxy() } returns proxy
+            every { proxy.webSocketHistory() } returns listOf(other, selected)
+
+            try {
+                runBlocking {
+                    val result = client.callTool("get_proxy_websocket_history_item", mapOf(
+                        "messageId" to 9876
+                    )).expectTextContent()
+                    assertTrue(result.contains("ORIGINAL_SELECTED_PAYLOAD"), result)
+                    assertFalse(result.contains("EDITED_SELECTED_PAYLOAD"))
+                    assertFalse(result.contains("OTHER_ITEM_SECRET"))
+                    assertEquals("No Proxy WebSocket history item found with ID 400", client.callTool(
+                        "get_proxy_websocket_history_item", mapOf("messageId" to 400)
+                    ).expectTextContent())
+
+                    val large = websocketMessage(402, 22, "LARGE_PAYLOAD_" + "X".repeat(10_000))
+                    every { proxy.webSocketHistory() } returns listOf(large)
+                    val bounded = client.callTool("get_proxy_websocket_history_item", mapOf(
+                        "messageId" to 402
+                    )).expectTextContent()
+                    assertTrue(bounded.length <= 5_000)
+                    assertTrue(bounded.contains("... (truncated)"))
+                    verify(atLeast = 2) { other.id() }
+                    verify(atLeast = 1) { selected.id() }
+                    verify(atLeast = 1) { large.id() }
+                    verify(exactly = 0) { api.http() }
+                    verify(exactly = 0) { api.websockets() }
+                    verify(exactly = 0) { api.repeater() }
+                    verify(exactly = 0) { api.intruder() }
+                    verify(exactly = 0) { api.organizer() }
+                    verify(exactly = 0) { proxy.enableIntercept() }
+                    verify(exactly = 0) { proxy.disableIntercept() }
+                    verify(exactly = 0) { annotations.setNotes(any()) }
+                    verify(exactly = 0) { annotations.setHighlightColor(any()) }
+                }
+            } finally {
+                unmockkStatic("net.portswigger.mcp.schema.SerializationKt")
             }
         }
 
