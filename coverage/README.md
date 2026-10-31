@@ -161,3 +161,25 @@ need_to_implement: sending request in repeater, adding markers in intruder opera
 | Claude Console output | Burp Suite Intruder |
 | --------------------- | ------------------- |
 | ![Claude Organizer Intruder validation](./assets/30_10_26_send_organizer_item_to_intruder.png) | ![Organizer request opened in Intruder](./assets/30_10_26_send_organizer_item_to_intruder1.png) |
+
+## 31.10.2026
+
+**feat(tools): add Organizer item notes**
+
+- Notes can be added to a Burp Organizer item using its official Montoya Organizer ID.
+- Organizer access approval is required before an item is read or modified.
+- New notes are appended by default, preserving existing notes on separate lines.
+- Existing notes are replaced only when `append` is explicitly set to `false`.
+- Blank or whitespace-only notes are rejected without modifying the Organizer item.
+- Unknown Organizer IDs return a clear error without modifying another item.
+- The item’s status and highlight color remain unchanged.
+- Other Organizer items and their annotations remain unchanged.
+- Tool results and logs do not expose note contents, HTTP data, cookies, tokens or authorization headers.
+- Updating notes does not transmit an HTTP request.
+- Updating notes does not open Repeater or Intruder or start an Intruder attack.
+- Updating notes does not create another Organizer item or modify Proxy history.
+- Notes are updated directly through the official Montoya annotations API without request serialization or reconstruction.
+
+| Claude Console output | Burp Suite Organizer |
+| --------------------- | -------------------- |
+| ![Claude Organizer notes validation](./assets/31_10_26_set_organizer_item_notes.png) | ![Organizer item notes updated](./assets/31_10_26_set_organizer_item_notes1.png) |

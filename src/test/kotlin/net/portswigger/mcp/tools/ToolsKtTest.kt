@@ -2183,6 +2183,166 @@ class ToolsKtTest {
         }
 
         @Test
+        fun `set organizer item notes appends by official ID and keeps output and logs safe`() {
+            val organizer = mockk<Organizer>()
+            val logging = mockk<Logging>(relaxed = true)
+            val logMessages = mutableListOf<String>()
+            val selected = organizerItem(
+                509,
+                "https://shop.test/path?token=HTTP_SECRET",
+                status = OrganizerItemStatus.DONE,
+                notes = "Existing note",
+                highlight = HighlightColor.CYAN,
+                requestText = "GET /path HTTP/1.1\r\nCookie: HTTP_SECRET\r\n\r\nHTTP_BODY_SECRET",
+                responseText = "HTTP/1.1 200 OK\r\nAuthorization: HTTP_SECRET\r\n\r\nHTTP_BODY_SECRET"
+            )
+            val other = organizerItem(510, "https://other.test/", notes = "OTHER_NOTE_SECRET")
+            val annotations = selected.annotations()
+            val otherAnnotations = other.annotations()
+            var selectedNotes = "Existing note"
+            every { annotations.notes() } answers { selectedNotes }
+            every { annotations.setNotes(any()) } answers { selectedNotes = firstArg() }
+            every { api.organizer() } returns organizer
+            every { organizer.items() } returns listOf(other, selected)
+            every { api.logging() } returns logging
+            every { logging.logToOutput(capture(logMessages)) } just runs
+
+            runBlocking {
+                val result = client.callTool("set_organizer_item_notes", mapOf(
+                    "organizerId" to 509, "notes" to "DISTINCTIVE_NOTE_SECRET"
+                )).expectTextContent()
+
+                assertEquals("Notes appended on Organizer item 509", result)
+                assertEquals("Existing note\nDISTINCTIVE_NOTE_SECRET", selectedNotes)
+                assertEquals("OTHER_NOTE_SECRET", otherAnnotations.notes())
+                assertEquals(OrganizerItemStatus.DONE, selected.status())
+                assertEquals(HighlightColor.CYAN, annotations.highlightColor())
+                assertFalse(result.contains("DISTINCTIVE_NOTE_SECRET"))
+                assertFalse(result.contains("HTTP_SECRET"))
+                assertFalse(result.contains("HTTP_BODY_SECRET"))
+                assertFalse(logMessages.joinToString(" ").contains("DISTINCTIVE_NOTE_SECRET"))
+                assertFalse(logMessages.joinToString(" ").contains("HTTP_SECRET"))
+                assertFalse(logMessages.joinToString(" ").contains("HTTP_BODY_SECRET"))
+                verify(exactly = 1) { other.id() }
+                verify(exactly = 1) { selected.id() }
+                verify(exactly = 1) { annotations.setNotes("Existing note\nDISTINCTIVE_NOTE_SECRET") }
+                verify(exactly = 0) { otherAnnotations.setNotes(any()) }
+                verify(exactly = 0) { annotations.setHighlightColor(any()) }
+                verify(exactly = 0) { api.http() }
+                verify(exactly = 0) { api.repeater() }
+                verify(exactly = 0) { api.intruder() }
+                verify(exactly = 0) { api.proxy() }
+                verify(exactly = 0) { organizer.sendToOrganizer(any<HttpRequest>()) }
+                verify(exactly = 0) { organizer.sendToOrganizer(any<MontoyaHttpRequestResponse>()) }
+            }
+        }
+
+        @Test
+        fun `set organizer item notes appends without leading newline and replaces when requested`() {
+            val organizer = mockk<Organizer>()
+            val empty = organizerItem(611, "https://empty.test/", notes = "")
+            val existing = organizerItem(612, "https://existing.test/", notes = "Original note")
+            val emptyAnnotations = empty.annotations()
+            val existingAnnotations = existing.annotations()
+            var emptyNotes = ""
+            var existingNotes = "Original note"
+            every { emptyAnnotations.notes() } answers { emptyNotes }
+            every { emptyAnnotations.setNotes(any()) } answers { emptyNotes = firstArg() }
+            every { existingAnnotations.notes() } answers { existingNotes }
+            every { existingAnnotations.setNotes(any()) } answers { existingNotes = firstArg() }
+            every { api.organizer() } returns organizer
+            every { organizer.items() } returns listOf(empty, existing)
+
+            runBlocking {
+                val defaultAppend = client.callTool("set_organizer_item_notes", mapOf(
+                    "organizerId" to 611, "notes" to "First note"
+                )).expectTextContent()
+                val replace = client.callTool("set_organizer_item_notes", mapOf(
+                    "organizerId" to 612, "notes" to "Replacement note", "append" to false
+                )).expectTextContent()
+
+                assertEquals("First note", emptyNotes)
+                assertEquals("Replacement note", existingNotes)
+                assertEquals("Notes appended on Organizer item 611", defaultAppend)
+                assertEquals("Notes replaced on Organizer item 612", replace)
+                verify(exactly = 1) { emptyAnnotations.setNotes("First note") }
+                verify(exactly = 1) { existingAnnotations.setNotes("Replacement note") }
+            }
+        }
+
+        @Test
+        fun `set organizer item notes rejects blank values and MCP remains usable`() {
+            val organizer = mockk<Organizer>()
+            val item = organizerItem(701, "https://shop.test/", notes = "Preserve this note")
+            val annotations = item.annotations()
+            var currentNotes = "Preserve this note"
+            every { annotations.notes() } answers { currentNotes }
+            every { annotations.setNotes(any()) } answers { currentNotes = firstArg() }
+            every { api.organizer() } returns organizer
+            every { organizer.items() } returns listOf(item)
+
+            runBlocking {
+                for (invalidNotes in listOf("", " \t\r\n")) {
+                    val result = client.callTool("set_organizer_item_notes", mapOf(
+                        "organizerId" to 701, "notes" to invalidNotes
+                    ))
+                    assertTrue(result?.isError ?: false)
+                    assertTrue(((result?.content?.firstOrNull() as? TextContent)?.text ?: "").contains("must not be blank"))
+                }
+                assertEquals("Preserve this note", currentNotes)
+                verify(exactly = 0) { annotations.setNotes(any()) }
+
+                assertEquals("Notes appended on Organizer item 701", client.callTool(
+                    "set_organizer_item_notes", mapOf("organizerId" to 701, "notes" to "MCP still connected")
+                ).expectTextContent())
+                assertEquals("Preserve this note\nMCP still connected", currentNotes)
+            }
+        }
+
+        @Test
+        fun `set organizer item notes unknown ID leaves other item unchanged`() {
+            val organizer = mockk<Organizer>()
+            val first = organizerItem(801, "https://first.test/", notes = "First note")
+            val second = organizerItem(802, "https://second.test/", notes = "Second note")
+            every { api.organizer() } returns organizer
+            every { organizer.items() } returns listOf(first, second)
+
+            runBlocking {
+                assertEquals("No Organizer item found with ID 2", client.callTool(
+                    "set_organizer_item_notes", mapOf("organizerId" to 2, "notes" to "Do not change")
+                ).expectTextContent())
+                verify(exactly = 1) { first.id() }
+                verify(exactly = 1) { second.id() }
+                verify(exactly = 0) { first.annotations().setNotes(any()) }
+                verify(exactly = 0) { second.annotations().setNotes(any()) }
+            }
+        }
+
+        @Test
+        fun `set organizer item notes access denial prevents lookup and modification`() {
+            val previousHandler = DataAccessSecurity.approvalHandler
+            val denyingHandler = mockk<DataAccessApprovalHandler>()
+            DataAccessSecurity.approvalHandler = denyingHandler
+            dataAccessApprovalRequired = true
+            coEvery { denyingHandler.requestDataAccess(DataAccessType.ORGANIZER, config) } returns false
+            try {
+                runBlocking {
+                    assertEquals("Organizer access denied by Burp Suite", client.callTool(
+                        "set_organizer_item_notes", mapOf("organizerId" to 901, "notes" to "Denied note")
+                    ).expectTextContent())
+                    verify(exactly = 0) { api.organizer() }
+                    verify(exactly = 0) { api.http() }
+                    verify(exactly = 0) { api.repeater() }
+                    verify(exactly = 0) { api.intruder() }
+                    verify(exactly = 0) { api.proxy() }
+                }
+            } finally {
+                dataAccessApprovalRequired = false
+                DataAccessSecurity.approvalHandler = previousHandler
+            }
+        }
+
+        @Test
         fun `get proxy history should paginate properly`() {
             val proxy = mockk<Proxy>()
             val proxyHistory = listOf(

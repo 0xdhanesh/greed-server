@@ -43,3 +43,4 @@ AGENTS.md
 
 ### gradle files ####
 .gradle-user-home/
+.kotlin/
