@@ -5,12 +5,16 @@ import burp.api.montoya.burpsuite.TaskExecutionEngine.TaskExecutionEngineState.P
 import burp.api.montoya.burpsuite.TaskExecutionEngine.TaskExecutionEngineState.RUNNING
 import burp.api.montoya.collaborator.InteractionFilter
 import burp.api.montoya.core.BurpSuiteEdition
+import burp.api.montoya.core.Range
 import burp.api.montoya.http.HttpMode
 import burp.api.montoya.http.HttpService
 import burp.api.montoya.core.HighlightColor
 import burp.api.montoya.http.message.HttpHeader
 import burp.api.montoya.http.message.HttpRequestResponse as MontoyaHttpRequestResponse
 import burp.api.montoya.http.message.requests.HttpRequest
+import burp.api.montoya.http.message.params.HttpParameterType
+import burp.api.montoya.http.message.params.ParsedHttpParameter
+import burp.api.montoya.intruder.HttpRequestTemplate
 import burp.api.montoya.organizer.OrganizerItem
 import burp.api.montoya.proxy.ProxyHttpRequestResponse
 import io.modelcontextprotocol.kotlin.sdk.server.Server
@@ -46,6 +50,56 @@ private fun findProxyHistoryItem(api: MontoyaApi, historyId: Int): ProxyHttpRequ
 
 private fun findOrganizerItem(api: MontoyaApi, organizerId: Int): OrganizerItem? =
     api.organizer().items().firstOrNull { it.id() == organizerId }
+
+private fun resolvePayloadRanges(
+    request: HttpRequest,
+    selectors: List<IntruderPayloadParameter>
+): List<Range> {
+    val parameters = request.parameters()
+    val allowedTypes = HttpParameterType.values().joinToString { it.name }
+    return selectors.map { selector ->
+        require(selector.name.isNotBlank()) { "Parameter name must not be blank" }
+        val type = selector.type?.let { requestedType ->
+            HttpParameterType.values().firstOrNull { it.name.equals(requestedType, ignoreCase = true) }
+                ?: throw IllegalArgumentException("Unsupported parameter type '$requestedType'. Allowed types: $allowedTypes")
+        }
+        selector.occurrence?.let { require(it > 0) { "Occurrence must be greater than zero for parameter '${selector.name}'" } }
+
+        val matches = parameters.filter { it.name() == selector.name && (type == null || it.type() == type) }
+        require(matches.isNotEmpty()) {
+            "No parameter named '${selector.name}'${type?.let { " of type ${it.name}" } ?: ""} was found"
+        }
+        val occurrence = selector.occurrence
+        if (occurrence == null) {
+            require(matches.size == 1) {
+                "Parameter '${selector.name}' is ambiguous (${matches.size} matches); specify type or occurrence"
+            }
+            matches.single().valueOffsets()
+        } else {
+            require(occurrence <= matches.size) {
+                "Occurrence $occurrence is out of range for parameter '${selector.name}' (${matches.size} matches)"
+            }
+            matches[occurrence - 1].valueOffsets()
+        }
+    }.distinctBy { it.startIndexInclusive() to it.endIndexExclusive() }
+}
+
+private fun sendToIntruder(
+    api: MontoyaApi,
+    request: HttpRequest,
+    tabName: String,
+    payloadParameters: List<IntruderPayloadParameter>?
+): Int {
+    if (payloadParameters.isNullOrEmpty()) {
+        api.intruder().sendToIntruder(request, tabName)
+        return 0
+    }
+
+    val ranges = resolvePayloadRanges(request, payloadParameters)
+    val template = HttpRequestTemplate.httpRequestTemplate(request, ranges)
+    api.intruder().sendToIntruder(request.httpService(), template, tabName)
+    return ranges.size
+}
 
 private fun buildHttp2HeaderList(
     pseudoHeaders: Map<String, String>, headers: Map<String, String>
@@ -385,7 +439,7 @@ fun Server.registerTools(api: MontoyaApi, config: McpConfig) {
     }
 
     mcpTool<SendProxyHistoryToIntruder>(
-        "Opens an existing Proxy HTTP history request in Burp Intruder using its official Montoya history ID. The final processed request is preferred. The tool does not start an Intruder attack or transmit the request."
+        "Opens a Proxy history request by Montoya history ID; prefers finalRequest(), then request(). Optional payloadParameters marks parameter values: pass exact name, optional case-insensitive type, and optional one-based occurrence. When a name is unique, pass only the name; a request-body value normally needs no type (JSON fields use JSON, form fields BODY, cookies COOKIE, query parameters URL, XML values XML or XML_ATTRIBUTE, multipart attributes MULTIPART_ATTRIBUTE). If ambiguous, inspect the request and retry with type, occurrence, or both; ambiguity is not a reason to ask the user to configure markers manually. When the user asks to mark a parameter/value as an Intruder payload position, always use payloadParameters. Never tell the user to add markers manually. The user need not specify type or occurrence for a unique name. Creates positions only; does not transmit the request or start an attack."
     ) {
         val allowed = checkDataAccessOrDeny(DataAccessType.HTTP_HISTORY, config, api, "HTTP history")
         if (!allowed) {
@@ -398,10 +452,11 @@ fun Server.registerTools(api: MontoyaApi, config: McpConfig) {
             ?: return@mcpTool "Proxy HTTP history item $historyId has no request to open in Intruder"
         val resolvedTabName = tabName?.takeIf { it.isNotBlank() } ?: "History $historyId"
 
-        api.intruder().sendToIntruder(request, resolvedTabName)
-        api.logging().logToOutput("Opened Proxy history item $historyId in Intruder; attack not started and request not sent")
+        val payloadPositionCount = sendToIntruder(api, request, resolvedTabName, payloadParameters)
+        val positions = if (payloadPositionCount > 0) " with $payloadPositionCount payload positions" else ""
+        api.logging().logToOutput("Opened Proxy history item $historyId in Intruder$positions; attack not started and request not sent")
 
-        "Opened Proxy history item $historyId in Intruder tab '$resolvedTabName'. No Intruder attack was started and no HTTP request was transmitted."
+        "Opened Proxy history item $historyId in Intruder tab '$resolvedTabName'$positions. No Intruder attack was started and no HTTP request was transmitted."
     }
 
     mcpTool<SetProxyHistoryNotes>(
@@ -603,7 +658,7 @@ fun Server.registerTools(api: MontoyaApi, config: McpConfig) {
     }
 
     mcpTool<SendOrganizerItemToIntruder>(
-        "Opens the request from one Burp Organizer item in Intruder using its official Montoya Organizer ID. The tool does not start an Intruder attack, transmit the request, or modify the Organizer item."
+        "Opens an Organizer request by Montoya Organizer ID. Optional payloadParameters marks parameter values: pass exact name, optional case-insensitive type, and optional one-based occurrence. When a name is unique, pass only the name; a request-body value normally needs no type (JSON fields use JSON, form fields BODY, cookies COOKIE, query parameters URL, XML values XML or XML_ATTRIBUTE, multipart attributes MULTIPART_ATTRIBUTE). If ambiguous, inspect the request and retry with type, occurrence, or both; ambiguity is not a reason to ask the user to configure markers manually. When the user asks to mark a parameter/value as an Intruder payload position, always use payloadParameters. Never tell the user to add markers manually. The user need not specify type or occurrence for a unique name. Creates positions only; does not transmit the request, start an attack, or modify Organizer."
     ) {
         val allowed = checkDataAccessOrDeny(DataAccessType.ORGANIZER, config, api, "Organizer")
         if (!allowed) {
@@ -616,10 +671,11 @@ fun Server.registerTools(api: MontoyaApi, config: McpConfig) {
             ?: return@mcpTool "Organizer item $organizerId has no request to open in Intruder"
         val resolvedTabName = tabName?.takeIf { it.isNotBlank() } ?: "Organizer $organizerId"
 
-        api.intruder().sendToIntruder(request, resolvedTabName)
-        api.logging().logToOutput("Opened Organizer item $organizerId in Intruder; attack not started and request not transmitted")
+        val payloadPositionCount = sendToIntruder(api, request, resolvedTabName, payloadParameters)
+        val positions = if (payloadPositionCount > 0) " with $payloadPositionCount payload positions" else ""
+        api.logging().logToOutput("Opened Organizer item $organizerId in Intruder$positions; attack not started and request not transmitted")
 
-        "Opened Organizer item $organizerId in Intruder tab '$resolvedTabName'. No Intruder attack was started and no HTTP request was transmitted."
+        "Opened Organizer item $organizerId in Intruder tab '$resolvedTabName'$positions. No Intruder attack was started and no HTTP request was transmitted."
     }
 
     mcpPaginatedTool<GetProxyWebsocketHistory>("Displays items within the proxy WebSocket history") {
@@ -799,7 +855,14 @@ data class GetProxyHttpHistoryItem(val historyId: Int)
 data class SendProxyHistoryToRepeater(val historyId: Int, val tabName: String? = null)
 
 @Serializable
-data class SendProxyHistoryToIntruder(val historyId: Int, val tabName: String? = null)
+data class SendProxyHistoryToIntruder(
+    val historyId: Int,
+    val tabName: String? = null,
+    val payloadParameters: List<IntruderPayloadParameter>? = null
+)
+
+@Serializable
+data class IntruderPayloadParameter(val name: String, val type: String? = null, val occurrence: Int? = null)
 
 @Serializable
 data class SetProxyHistoryNotes(val historyId: Int, val notes: String, val append: Boolean = true)
@@ -845,7 +908,11 @@ data class SetOrganizerItemNotes(val organizerId: Int, val notes: String, val ap
 data class SendOrganizerItemToRepeater(val organizerId: Int, val tabName: String? = null)
 
 @Serializable
-data class SendOrganizerItemToIntruder(val organizerId: Int, val tabName: String? = null)
+data class SendOrganizerItemToIntruder(
+    val organizerId: Int,
+    val tabName: String? = null,
+    val payloadParameters: List<IntruderPayloadParameter>? = null
+)
 
 @Serializable
 data class OrganizerItemSummary(

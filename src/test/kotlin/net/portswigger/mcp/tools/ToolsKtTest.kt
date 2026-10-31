@@ -7,6 +7,7 @@ import burp.api.montoya.core.BurpSuiteEdition
 import burp.api.montoya.core.ByteArray
 import burp.api.montoya.core.Annotations
 import burp.api.montoya.core.HighlightColor
+import burp.api.montoya.core.Range
 import burp.api.montoya.http.Http
 import burp.api.montoya.http.HttpMode
 import burp.api.montoya.http.HttpProtocol
@@ -15,6 +16,9 @@ import burp.api.montoya.http.message.HttpRequestResponse as MontoyaHttpRequestRe
 import burp.api.montoya.http.message.requests.HttpRequest
 import burp.api.montoya.http.message.responses.HttpResponse
 import burp.api.montoya.intruder.Intruder
+import burp.api.montoya.intruder.HttpRequestTemplate
+import burp.api.montoya.http.message.params.HttpParameterType
+import burp.api.montoya.http.message.params.ParsedHttpParameter
 import burp.api.montoya.organizer.Organizer
 import burp.api.montoya.organizer.OrganizerItem
 import burp.api.montoya.organizer.OrganizerItemFilter
@@ -786,6 +790,22 @@ class ToolsKtTest {
             return item
         }
 
+        private fun parsedParameter(
+            name: String,
+            type: HttpParameterType,
+            start: Int,
+            end: Int,
+            secretValue: String
+        ): ParsedHttpParameter = mockk<ParsedHttpParameter>().also { parameter ->
+            val offsets = mockk<Range>()
+            every { offsets.startIndexInclusive() } returns start
+            every { offsets.endIndexExclusive() } returns end
+            every { parameter.name() } returns name
+            every { parameter.type() } returns type
+            every { parameter.value() } returns secretValue
+            every { parameter.valueOffsets() } returns offsets
+        }
+
         private fun historyItem(
             id: Int,
             url: String,
@@ -1119,6 +1139,7 @@ class ToolsKtTest {
                 verify(exactly = 1) { selected.finalRequest() }
                 verify(exactly = 0) { selected.request() }
                 verify(exactly = 1) { intruder.sendToIntruder(finalRequest, "MCP History Intruder validation") }
+                verify(exactly = 0) { finalRequest.parameters() }
                 verify(exactly = 0) { api.http() }
                 verify(exactly = 0) { api.repeater() }
                 verify(exactly = 0) { api.organizer() }
@@ -1153,6 +1174,7 @@ class ToolsKtTest {
                 verify(exactly = 2) { item.finalRequest() }
                 verify(exactly = 3) { item.request() }
                 verify(exactly = 2) { intruder.sendToIntruder(request, "History 62") }
+                verify(exactly = 0) { request.parameters() }
                 verify(exactly = 0) { api.http() }
                 verify(exactly = 0) { api.repeater() }
                 verify(exactly = 0) { api.organizer() }
@@ -2091,6 +2113,7 @@ class ToolsKtTest {
                 verify(exactly = 1) { selected.id() }
                 verify(exactly = 2) { selected.request() }
                 verify(exactly = 1) { intruder.sendToIntruder(request, "MCP Organizer Intruder validation") }
+                verify(exactly = 0) { request.parameters() }
                 assertEquals(OrganizerItemStatus.DONE, selected.status())
                 verify(exactly = 0) { annotations.setNotes(any()) }
                 verify(exactly = 0) { annotations.setHighlightColor(any()) }
@@ -2125,6 +2148,7 @@ class ToolsKtTest {
                 assertTrue(omitted.contains("No Intruder attack was started"))
                 assertTrue(omitted.contains("no HTTP request was transmitted"))
                 verify(exactly = 2) { intruder.sendToIntruder(request, "Organizer 78") }
+                verify(exactly = 0) { request.parameters() }
                 verify(exactly = 0) { api.http() }
                 verify(exactly = 0) { api.repeater() }
                 verify(exactly = 0) { api.proxy() }
@@ -2337,6 +2361,393 @@ class ToolsKtTest {
                     verify(exactly = 0) { api.proxy() }
                 }
             } finally {
+                dataAccessApprovalRequired = false
+                DataAccessSecurity.approvalHandler = previousHandler
+            }
+        }
+
+        @Test
+        fun `proxy history intruder selects exact typed occurrences and deduplicates ranges`() {
+            val proxy = mockk<Proxy>()
+            val intruder = mockk<Intruder>(relaxed = true)
+            val logging = mockk<Logging>(relaxed = true)
+            val logMessages = mutableListOf<String>()
+            val selected = historyItem(
+                4402,
+                "https://shop.test/login?token=URL_SECRET",
+                initialNotes = "NOTES_SECRET"
+            )
+            val request = mockk<HttpRequest>()
+            val service = mockk<burp.api.montoya.http.HttpService>()
+            val template = mockk<HttpRequestTemplate>()
+            val emailJsonFirst = parsedParameter("email", HttpParameterType.JSON, 10, 25, "EMAIL_FIRST_SECRET")
+            val emailUrl = parsedParameter("email", HttpParameterType.URL, 35, 50, "EMAIL_URL_SECRET")
+            val emailJsonSecond = parsedParameter("email", HttpParameterType.JSON, 60, 75, "EMAIL_SECOND_SECRET")
+            val passwordJson = parsedParameter("password", HttpParameterType.JSON, 85, 105, "PASSWORD_SECRET")
+            val selectedRanges = listOf(emailJsonSecond.valueOffsets(), emailUrl.valueOffsets(), passwordJson.valueOffsets())
+            every { selected.finalRequest() } returns request
+            every { request.parameters() } returns listOf(emailJsonFirst, emailUrl, emailJsonSecond, passwordJson)
+            every { request.toString() } returns "GET /login?token=REQUEST_URL_SECRET HTTP/1.1\r\nAuthorization: HEADER_SECRET\r\nCookie: COOKIE_SECRET\r\n\r\nBODY_SECRET"
+            every { request.httpService() } returns service
+            every { api.proxy() } returns proxy
+            every { proxy.history() } returns listOf(historyItem(4401, "https://other.test/"), selected)
+            every { api.intruder() } returns intruder
+            every { api.logging() } returns logging
+            every { logging.logToOutput(capture(logMessages)) } just runs
+            mockkStatic(HttpRequestTemplate::class)
+            every { HttpRequestTemplate.httpRequestTemplate(request, any<List<Range>>()) } returns template
+
+            try {
+                runBlocking {
+                    val result = client.callTool("send_proxy_history_to_intruder", mapOf(
+                        "historyId" to 4402,
+                        "tabName" to "Selected parameters",
+                        "payloadParameters" to listOf(
+                            mapOf("name" to "email", "type" to "jSoN", "occurrence" to 2),
+                            mapOf("name" to "email", "type" to "URL"),
+                            mapOf("name" to "password", "type" to "json", "occurrence" to 1),
+                            mapOf("name" to "password", "type" to "JSON", "occurrence" to 1)
+                        )
+                    )).expectTextContent()
+
+                    assertEquals(
+                        "Opened Proxy history item 4402 in Intruder tab 'Selected parameters' with 3 payload positions. No Intruder attack was started and no HTTP request was transmitted.",
+                        result
+                    )
+                    listOf("EMAIL_FIRST_SECRET", "EMAIL_URL_SECRET", "EMAIL_SECOND_SECRET", "PASSWORD_SECRET", "URL_SECRET", "NOTES_SECRET", "REQUEST_URL_SECRET", "HEADER_SECRET", "COOKIE_SECRET", "BODY_SECRET")
+                        .forEach { secret -> assertFalse(result.contains(secret)) }
+                    listOf("EMAIL_FIRST_SECRET", "EMAIL_URL_SECRET", "EMAIL_SECOND_SECRET", "PASSWORD_SECRET", "URL_SECRET", "NOTES_SECRET", "REQUEST_URL_SECRET", "HEADER_SECRET", "COOKIE_SECRET", "BODY_SECRET")
+                        .forEach { secret -> assertFalse(logMessages.joinToString(" ").contains(secret)) }
+                    val rangesSlot = slot<List<Range>>()
+                    verify(exactly = 1) { HttpRequestTemplate.httpRequestTemplate(request, capture(rangesSlot)) }
+                    assertEquals(3, rangesSlot.captured.size)
+                    assertEquals(
+                        selectedRanges.map { it.startIndexInclusive() to it.endIndexExclusive() },
+                        rangesSlot.captured.map { it.startIndexInclusive() to it.endIndexExclusive() }
+                    )
+                    verify(exactly = 1) { intruder.sendToIntruder(service, template, "Selected parameters") }
+                    verify(exactly = 0) { intruder.sendToIntruder(any<HttpRequest>(), any<String>()) }
+                    verify(exactly = 0) { api.http() }
+                    verify(exactly = 0) { api.repeater() }
+                    verify(exactly = 0) { api.organizer() }
+                    verify(exactly = 0) { proxy.enableIntercept() }
+                    verify(exactly = 0) { proxy.disableIntercept() }
+                }
+            } finally {
+                unmockkStatic(HttpRequestTemplate::class)
+            }
+        }
+
+        @Test
+        fun `natural language selectors resolve unique password cookie and query values`() {
+            val proxy = mockk<Proxy>()
+            val intruder = mockk<Intruder>(relaxed = true)
+            val logging = mockk<Logging>(relaxed = true)
+            val logMessages = mutableListOf<String>()
+            val history = historyItem(6060, "https://shop.test/search?q=QUERY_VALUE_SECRET")
+            val request = mockk<HttpRequest>()
+            val service = mockk<burp.api.montoya.http.HttpService>()
+            val template = mockk<HttpRequestTemplate>()
+            val password = parsedParameter("password", HttpParameterType.JSON, 10, 27, "PASSWORD_VALUE_SECRET")
+            val language = parsedParameter("language", HttpParameterType.COOKIE, 35, 43, "COOKIE_VALUE_SECRET")
+            val query = parsedParameter("q", HttpParameterType.URL, 50, 66, "QUERY_VALUE_SECRET")
+            val expectedRanges = listOf(password.valueOffsets(), language.valueOffsets(), query.valueOffsets())
+            val resolvedRanges = mutableListOf<List<Range>>()
+            every { history.finalRequest() } returns request
+            every { request.parameters() } returns listOf(password, language, query)
+            every { request.httpService() } returns service
+            every { proxy.history() } returns listOf(history)
+            every { api.proxy() } returns proxy
+            every { api.intruder() } returns intruder
+            every { api.logging() } returns logging
+            every { logging.logToOutput(capture(logMessages)) } just runs
+            mockkStatic(HttpRequestTemplate::class)
+            every { HttpRequestTemplate.httpRequestTemplate(request, capture(resolvedRanges)) } returns template
+
+            try {
+                runBlocking {
+                    val passwordResult = client.callTool("send_proxy_history_to_intruder", mapOf(
+                        "historyId" to 6060,
+                        "payloadParameters" to listOf(mapOf("name" to "password"))
+                    )).expectTextContent()
+                    val cookieResult = client.callTool("send_proxy_history_to_intruder", mapOf(
+                        "historyId" to 6060,
+                        "payloadParameters" to listOf(mapOf("name" to "language", "type" to "cOoKiE"))
+                    )).expectTextContent()
+                    val queryResult = client.callTool("send_proxy_history_to_intruder", mapOf(
+                        "historyId" to 6060,
+                        "payloadParameters" to listOf(mapOf("name" to "q", "type" to "URL"))
+                    )).expectTextContent()
+
+                    listOf(passwordResult, cookieResult, queryResult).forEach { result ->
+                        assertTrue(result.contains("with 1 payload positions"), result)
+                        listOf("PASSWORD_VALUE_SECRET", "COOKIE_VALUE_SECRET", "QUERY_VALUE_SECRET")
+                            .forEach { assertFalse(result.contains(it)) }
+                    }
+                    assertEquals(expectedRanges.map { listOf(it) }, resolvedRanges)
+                    verify(exactly = 3) { intruder.sendToIntruder(service, template, "History 6060") }
+                    verify(exactly = 0) { api.http() }
+                    verify(exactly = 0) { api.repeater() }
+                    verify(exactly = 0) { api.organizer() }
+                    listOf("PASSWORD_VALUE_SECRET", "COOKIE_VALUE_SECRET", "QUERY_VALUE_SECRET")
+                        .forEach { assertFalse(logMessages.joinToString(" ").contains(it)) }
+                }
+            } finally {
+                unmockkStatic(HttpRequestTemplate::class)
+            }
+        }
+
+        @Test
+        fun `Intruder tool descriptions teach the AI client payload selector behavior`() {
+            runBlocking {
+                val tools = client.listTools()
+                val proxyDescription = tools.single { it.name == "send_proxy_history_to_intruder" }.description.orEmpty()
+                val organizerDescription = tools.single { it.name == "send_organizer_item_to_intruder" }.description.orEmpty()
+
+                listOf(proxyDescription, organizerDescription).forEach { description ->
+                    assertTrue(description.contains("payloadParameters"), description)
+                    assertTrue(description.contains("unique"), description)
+                    assertTrue(description.contains("one-based occurrence"), description)
+                    assertTrue(description.contains("Never tell the user"), description)
+                    assertTrue(description.contains("manual"), description)
+                    assertTrue(description.contains("JSON"), description)
+                    assertTrue(description.contains("BODY"), description)
+                    assertTrue(description.contains("COOKIE"), description)
+                    assertTrue(description.contains("URL"), description)
+                    assertTrue(description.contains("XML_ATTRIBUTE"), description)
+                    assertTrue(description.contains("MULTIPART_ATTRIBUTE"), description)
+                    assertTrue(description.contains("ambiguous"), description)
+                    assertTrue(description.contains("does not transmit"), description)
+                    assertTrue(description.contains("start an attack"), description)
+                }
+                assertTrue(tools.single { it.name == "send_proxy_history_to_intruder" }.inputSchema.toString().contains("payloadParameters"))
+                assertTrue(tools.single { it.name == "send_organizer_item_to_intruder" }.inputSchema.toString().contains("payloadParameters"))
+            }
+        }
+
+        @Test
+        fun `organizer intruder selects parameter using original request without modifying item`() {
+            val organizer = mockk<Organizer>()
+            val intruder = mockk<Intruder>(relaxed = true)
+            val item = organizerItem(
+                5502,
+                "https://shop.test/account",
+                status = OrganizerItemStatus.DONE,
+                notes = "ORGANIZER_NOTE_SECRET",
+                highlight = HighlightColor.CYAN
+            )
+            val request = item.request()
+            val service = mockk<burp.api.montoya.http.HttpService>()
+            val template = mockk<HttpRequestTemplate>()
+            val logging = mockk<Logging>(relaxed = true)
+            val logMessages = mutableListOf<String>()
+            val parameter = parsedParameter("language", HttpParameterType.COOKIE, 18, 38, "COOKIE_VALUE_SECRET")
+            val parameterRange = parameter.valueOffsets()
+            val annotations = item.annotations()
+            every { request.parameters() } returns listOf(parameter)
+            every { request.toString() } returns "POST /account?token=URL_SECRET HTTP/1.1\r\nAuthorization: HEADER_SECRET\r\nCookie: COOKIE_SECRET\r\n\r\nBODY_SECRET"
+            every { request.httpService() } returns service
+            every { api.organizer() } returns organizer
+            every { organizer.items() } returns listOf(item)
+            every { api.intruder() } returns intruder
+            every { api.logging() } returns logging
+            every { logging.logToOutput(capture(logMessages)) } just runs
+            mockkStatic(HttpRequestTemplate::class)
+            every { HttpRequestTemplate.httpRequestTemplate(request, listOf(parameterRange)) } returns template
+
+            try {
+                runBlocking {
+                    val result = client.callTool("send_organizer_item_to_intruder", mapOf(
+                        "organizerId" to 5502,
+                        "payloadParameters" to listOf(mapOf("name" to "language", "type" to "COOKIE"))
+                    )).expectTextContent()
+
+                    assertTrue(result.contains("Organizer item 5502"), result)
+                    assertTrue(result.contains("with 1 payload positions"), result)
+                    listOf("COOKIE_VALUE_SECRET", "ORGANIZER_NOTE_SECRET", "URL_SECRET", "HEADER_SECRET", "COOKIE_SECRET", "BODY_SECRET")
+                        .forEach { secret ->
+                            assertFalse(result.contains(secret))
+                            assertFalse(logMessages.joinToString(" ").contains(secret))
+                        }
+                    verify(exactly = 1) { HttpRequestTemplate.httpRequestTemplate(request, listOf(parameterRange)) }
+                    verify(exactly = 1) { intruder.sendToIntruder(service, template, "Organizer 5502") }
+                    verify(exactly = 0) { intruder.sendToIntruder(any<HttpRequest>(), any<String>()) }
+                    verify(exactly = 0) { annotations.setNotes(any()) }
+                    verify(exactly = 0) { annotations.setHighlightColor(any()) }
+                    assertEquals(OrganizerItemStatus.DONE, item.status())
+                    assertEquals("ORGANIZER_NOTE_SECRET", annotations.notes())
+                    assertEquals(HighlightColor.CYAN, annotations.highlightColor())
+                    verify(exactly = 0) { organizer.sendToOrganizer(any<HttpRequest>()) }
+                    verify(exactly = 0) { organizer.sendToOrganizer(any<MontoyaHttpRequestResponse>()) }
+                    verify(exactly = 0) { api.http() }
+                    verify(exactly = 0) { api.repeater() }
+                    verify(exactly = 0) { api.proxy() }
+                }
+            } finally {
+                unmockkStatic(HttpRequestTemplate::class)
+            }
+        }
+
+        @Test
+        fun `intruder selector errors stay controlled and do not open Intruder`() {
+            val proxy = mockk<Proxy>()
+            val intruder = mockk<Intruder>(relaxed = true)
+            val item = historyItem(6602, "https://shop.test/?name=URL_VALUE_SECRET")
+            val request = mockk<HttpRequest>()
+            val service = mockk<burp.api.montoya.http.HttpService>()
+            val unique = parsedParameter("unique", HttpParameterType.JSON, 10, 20, "UNIQUE_VALUE_SECRET")
+            val duplicateJsonA = parsedParameter("duplicate", HttpParameterType.JSON, 30, 40, "DUPLICATE_A_SECRET")
+            val duplicateJsonB = parsedParameter("duplicate", HttpParameterType.JSON, 50, 60, "DUPLICATE_B_SECRET")
+            val duplicateUrl = parsedParameter("duplicate", HttpParameterType.URL, 70, 80, "DUPLICATE_URL_SECRET")
+            val uniqueRange = unique.valueOffsets()
+            val template = mockk<HttpRequestTemplate>()
+            every { item.finalRequest() } returns request
+            every { request.parameters() } returns listOf(unique, duplicateJsonA, duplicateJsonB, duplicateUrl)
+            every { request.httpService() } returns service
+            every { api.proxy() } returns proxy
+            every { proxy.history() } returns listOf(item)
+            every { api.intruder() } returns intruder
+            mockkStatic(HttpRequestTemplate::class)
+            every { HttpRequestTemplate.httpRequestTemplate(request, any<List<Range>>()) } returns template
+
+            val invalidSelectors = listOf(
+                mapOf("name" to "  "),
+                mapOf("name" to "unique", "type" to "HEADER"),
+                mapOf("name" to "unique", "occurrence" to 0),
+                mapOf("name" to "unique", "occurrence" to -1),
+                mapOf("name" to "duplicate", "type" to "JSON", "occurrence" to 3),
+                mapOf("name" to "missing"),
+                mapOf("name" to "Duplicate"),
+                mapOf("name" to "duplicate")
+            )
+            try {
+                runBlocking {
+                    invalidSelectors.forEach { selector ->
+                        val result = client.callTool("send_proxy_history_to_intruder", mapOf(
+                            "historyId" to 6602, "payloadParameters" to listOf(selector)
+                        ))
+                        assertTrue(result?.isError ?: false)
+                        assertFalse((result?.content?.firstOrNull() as? TextContent)?.text.orEmpty().contains("UNIQUE_VALUE_SECRET"))
+                        assertFalse((result?.content?.firstOrNull() as? TextContent)?.text.orEmpty().contains("DUPLICATE_A_SECRET"))
+                    }
+                    val invalidSecondSelector = client.callTool("send_proxy_history_to_intruder", mapOf(
+                        "historyId" to 6602,
+                        "payloadParameters" to listOf(mapOf("name" to "unique"), mapOf("name" to "missing"))
+                    ))
+                    assertTrue(invalidSecondSelector?.isError ?: false)
+                    verify(exactly = 0) { api.intruder() }
+                    verify(exactly = 0) { HttpRequestTemplate.httpRequestTemplate(any<HttpRequest>(), any<List<Range>>()) }
+
+                    val validResult = client.callTool("send_proxy_history_to_intruder", mapOf(
+                        "historyId" to 6602, "payloadParameters" to listOf(mapOf("name" to "unique", "type" to "jSoN"))
+                    )).expectTextContent()
+                    assertTrue(validResult.contains("with 1 payload positions"))
+                    verify(exactly = 1) { HttpRequestTemplate.httpRequestTemplate(request, listOf(uniqueRange)) }
+                    verify(exactly = 1) { intruder.sendToIntruder(service, template, "History 6602") }
+                }
+            } finally {
+                unmockkStatic(HttpRequestTemplate::class)
+            }
+        }
+
+        @Test
+        fun `proxy Intruder payload positions use original request when final request is unavailable`() {
+            val proxy = mockk<Proxy>()
+            val intruder = mockk<Intruder>(relaxed = true)
+            val item = historyItem(7702, "https://shop.test/fallback")
+            val originalRequest = item.request()
+            val service = mockk<burp.api.montoya.http.HttpService>()
+            val template = mockk<HttpRequestTemplate>()
+            val parameter = parsedParameter("id", HttpParameterType.URL, 5, 8, "ID_VALUE_SECRET")
+            val parameterRange = parameter.valueOffsets()
+            every { originalRequest.parameters() } returns listOf(parameter)
+            every { originalRequest.httpService() } returns service
+            every { api.proxy() } returns proxy
+            every { proxy.history() } returns listOf(item)
+            every { api.intruder() } returns intruder
+            mockkStatic(HttpRequestTemplate::class)
+            every { HttpRequestTemplate.httpRequestTemplate(originalRequest, listOf(parameterRange)) } returns template
+
+            try {
+                runBlocking {
+                    val result = client.callTool("send_proxy_history_to_intruder", mapOf(
+                        "historyId" to 7702,
+                        "payloadParameters" to listOf(mapOf("name" to "id", "type" to "url"))
+                    )).expectTextContent()
+
+                    assertTrue(result.contains("with 1 payload positions"), result)
+                    verify(exactly = 1) { item.finalRequest() }
+                    verify(exactly = 2) { item.request() }
+                    verify(exactly = 1) { HttpRequestTemplate.httpRequestTemplate(originalRequest, listOf(parameterRange)) }
+                    verify(exactly = 1) { intruder.sendToIntruder(service, template, "History 7702") }
+                }
+            } finally {
+                unmockkStatic(HttpRequestTemplate::class)
+            }
+        }
+
+        @Test
+        fun `Intruder source lookup failures with selectors never create a template or open Intruder`() {
+            val proxy = mockk<Proxy>()
+            val organizer = mockk<Organizer>()
+            val proxyItem = historyItem(7801, "https://shop.test/proxy")
+            every { proxyItem.request() } returns null
+            val organizerItem = mockk<OrganizerItem>()
+            every { organizerItem.id() } returns 8801
+            every { organizerItem.request() } returns null
+            every { api.proxy() } returns proxy
+            every { proxy.history() } returns listOf(proxyItem)
+            every { api.organizer() } returns organizer
+            every { organizer.items() } returns listOf(organizerItem)
+            mockkStatic(HttpRequestTemplate::class)
+
+            try {
+                runBlocking {
+                    val selector = listOf(mapOf("name" to "id", "type" to "URL"))
+                    assertTrue(client.callTool("send_proxy_history_to_intruder", mapOf(
+                        "historyId" to 2, "payloadParameters" to selector
+                    )).expectTextContent().contains("No Proxy HTTP history item found with ID 2"))
+                    assertTrue(client.callTool("send_proxy_history_to_intruder", mapOf(
+                        "historyId" to 7801, "payloadParameters" to selector
+                    ))?.expectTextContent()?.contains("has no request") ?: false)
+                    assertTrue(client.callTool("send_organizer_item_to_intruder", mapOf(
+                        "organizerId" to 2, "payloadParameters" to selector
+                    ))?.expectTextContent()?.contains("No Organizer item found") ?: false)
+                    assertTrue(client.callTool("send_organizer_item_to_intruder", mapOf(
+                        "organizerId" to 8801, "payloadParameters" to selector
+                    ))?.expectTextContent()?.contains("has no request") ?: false)
+                    verify(exactly = 0) { HttpRequestTemplate.httpRequestTemplate(any<HttpRequest>(), any<List<Range>>()) }
+                    verify(exactly = 0) { api.intruder() }
+                }
+            } finally {
+                unmockkStatic(HttpRequestTemplate::class)
+            }
+        }
+
+        @Test
+        fun `Intruder payload access denial prevents lookup and opening for both sources`() {
+            val previousHandler = DataAccessSecurity.approvalHandler
+            val denyingHandler = mockk<DataAccessApprovalHandler>()
+            DataAccessSecurity.approvalHandler = denyingHandler
+            dataAccessApprovalRequired = true
+            coEvery { denyingHandler.requestDataAccess(any(), config) } returns false
+            mockkStatic(HttpRequestTemplate::class)
+            try {
+                runBlocking {
+                    val selector = listOf(mapOf("name" to "id", "type" to "URL"))
+                    assertEquals("HTTP history access denied by Burp Suite", client.callTool(
+                        "send_proxy_history_to_intruder", mapOf("historyId" to 1, "payloadParameters" to selector)
+                    ).expectTextContent())
+                    assertEquals("Organizer access denied by Burp Suite", client.callTool(
+                        "send_organizer_item_to_intruder", mapOf("organizerId" to 1, "payloadParameters" to selector)
+                    ).expectTextContent())
+                    verify(exactly = 0) { api.proxy() }
+                    verify(exactly = 0) { api.organizer() }
+                    verify(exactly = 0) { api.intruder() }
+                    verify(exactly = 0) { HttpRequestTemplate.httpRequestTemplate(any<HttpRequest>(), any<List<Range>>()) }
+                }
+            } finally {
+                unmockkStatic(HttpRequestTemplate::class)
                 dataAccessApprovalRequired = false
                 DataAccessSecurity.approvalHandler = previousHandler
             }
