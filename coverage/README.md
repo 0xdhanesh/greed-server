@@ -3,7 +3,7 @@
 Changes made during each commit - to keep track of the functionality and to plan future implementations.
 
 ---
-need_to_implement: sending request in repeater, adding markers in intruder operations
+need_to_implement: sending request in repeater, adding markers in intruder operations, list all the tabs in repeater section - mcp created and manually created.
 
 ---
 
