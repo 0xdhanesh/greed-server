@@ -52,8 +52,89 @@ jobs:
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: burp-mcp-extension
-          path: build/libs/burp-mcp-*.jar
+          path: build/libs/greed-server-*.jar
           retention-days: 30
+  
+  release:
+   name: Publish extension JAR
+   needs: build
+   if: ${{ github.event_name == 'push' && !startsWith(github.ref_name, 'dependabot/') }}
+   runs-on: ubuntu-latest
+   timeout-minutes: 10
+   concurrency:
+     group: publish-extension-release
+     cancel-in-progress: false
+   permissions:
+     contents: write
+   steps:
+     - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+     - name: Download extension JAR
+       uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
+       with:
+         name: burp-mcp-extension
+         path: release
+     - name: Publish GitHub release
+       env:
+         GH_TOKEN: ${{ github.token }}
+       run: |
+         set -euo pipefail
+         version=$(sed -n 's/^version=//p' gradle.properties)
+         if [[ -z "$version" ]]; then
+           echo "Could not read the Gradle project version." >&2
+           exit 1
+         fi
+         jar=$(find release -name "*.jar" -maxdepth 1 -type f | head -1)
+         if [[ -z "$jar" ]]; then
+           echo "Built JAR was not found in the downloaded artifact." >&2
+           find release -type f -print >&2
+           exit 1
+         fi
+         jar_name=$(basename "$jar")
+         short="${GITHUB_SHA::7}"
+         tag="build-${GITHUB_SHA}"
+         checksum=$(sha256sum "$jar" | awk '{print $1}')
+         notes_file=$(mktemp)
+         {
+           echo "Download \`${jar_name}\` and load it in Burp Suite."
+           echo
+           echo "1. Open Extensions, then Add."
+           echo "2. Set the extension type to Java."
+           echo "3. Select \`${jar_name}\`."
+           echo
+           echo "Do not install \`libs/mcp-proxy-all.jar\` as a Burp extension."
+           echo
+           echo "- Version label: ${version}"
+           echo "- Commit: ${GITHUB_SHA}"
+           echo "- Branch: ${GITHUB_REF_NAME}"
+           echo "- SHA-256: ${checksum}"
+         } > "$notes_file"
+         if gh release view "$tag" >/dev/null 2>&1; then
+           gh release upload "$tag" "$jar" --clobber
+         else
+           gh release create "$tag" "$jar" \
+             --target "$GITHUB_SHA" \
+             --title "Burp MCP Server v${version} (${short})" \
+             --notes-file "$notes_file" \
+             --latest
+         fi
+
+     - name: Keep the three newest build releases
+       env:
+         GH_TOKEN: ${{ github.token }}
+       run: |
+         set -euo pipefail
+         release_tags=$(gh release list --limit 1000 \
+           --json tagName,publishedAt,isDraft \
+           --jq '[.[] | select(.tagName | startswith("build-")) | select(.isDraft | not)] | sort_by(.publishedAt) | reverse | .[].tagName')
+         if [[ -z "$release_tags" ]]; then
+           echo "No published build releases were found." >&2
+           exit 1
+         fi
+         mapfile -t releases <<< "$release_tags"
+         for tag in "${releases[@]:3}"; do
+           gh release delete "$tag" --cleanup-tag --yes
+         done
+         gh release edit "${releases[0]}" --latest
 
   dependency-submission:
     name: Dependency Submission
