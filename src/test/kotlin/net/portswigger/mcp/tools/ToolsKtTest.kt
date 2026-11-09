@@ -3,6 +3,7 @@ package net.portswigger.mcp.tools
 import burp.api.montoya.MontoyaApi
 import burp.api.montoya.burpsuite.TaskExecutionEngine
 import burp.api.montoya.collaborator.*
+import burp.api.montoya.comparer.Comparer
 import burp.api.montoya.core.BurpSuiteEdition
 import burp.api.montoya.core.ByteArray
 import burp.api.montoya.core.Annotations
@@ -892,6 +893,29 @@ class ToolsKtTest {
                 firstArg<Pattern>().matcher(payloadText).find()
             }
             return message
+        }
+
+        private fun comparerWebSocketMessage(
+            id: Int,
+            originalPayload: ByteArray,
+            editedPayload: ByteArray? = null
+        ): ProxyWebSocketMessage {
+            val message = mockk<ProxyWebSocketMessage>()
+            val annotations = mockk<Annotations>()
+            val upgradeRequest = mockk<HttpRequest>()
+            every { annotations.notes() } returns "NOTES_SECRET"
+            every { message.id() } returns id
+            every { message.payload() } returns originalPayload
+            every { message.editedPayload() } returns editedPayload
+            every { message.annotations() } returns annotations
+            every { message.upgradeRequest() } returns upgradeRequest
+            every { upgradeRequest.toString() } returns "GET /PRIVATE_URL?token=TOKEN_SECRET HTTP/1.1\r\nCookie: COOKIE_SECRET\r\nAuthorization: AUTH_SECRET"
+            return message
+        }
+
+        private fun byteArrayMock(contents: String): ByteArray = mockk<ByteArray>().also {
+            every { it.toString() } returns contents
+            every { it.length() } returns contents.length
         }
 
         @Test
@@ -3003,6 +3027,165 @@ class ToolsKtTest {
                 }
             } finally {
                 unmockkStatic("net.portswigger.mcp.schema.SerializationKt")
+            }
+        }
+
+        @Test
+        fun `WebSocket Comparer tool prefers and passes the exact edited ByteArray safely`() {
+            val proxy = mockk<Proxy>()
+            val comparer = mockk<Comparer>(relaxed = true)
+            val logging = mockk<Logging>(relaxed = true)
+            val logMessages = mutableListOf<String>()
+            val otherPayload = byteArrayMock("NEIGHBOR_PAYLOAD_SECRET")
+            val originalPayload = byteArrayMock("ORIGINAL_PAYLOAD_SECRET")
+            val editedPayload = byteArrayMock("EDITED_PAYLOAD_SECRET")
+            val other = comparerWebSocketMessage(99, otherPayload)
+            val selected = comparerWebSocketMessage(3, originalPayload, editedPayload)
+            every { api.proxy() } returns proxy
+            every { proxy.webSocketHistory() } returns listOf(other, selected)
+            every { api.comparer() } returns comparer
+            every { api.logging() } returns logging
+            every { logging.logToOutput(capture(logMessages)) } just runs
+
+            runBlocking {
+                val result = client.callTool("send_proxy_websocket_history_item_to_comparer", mapOf(
+                    "messageId" to 3
+                )).expectTextContent()
+
+                assertEquals("Sent the edited payload from Proxy WebSocket history item 3 to Comparer. No message was transmitted.", result)
+                listOf("NEIGHBOR_PAYLOAD_SECRET", "ORIGINAL_PAYLOAD_SECRET", "EDITED_PAYLOAD_SECRET", "PRIVATE_URL", "TOKEN_SECRET", "COOKIE_SECRET", "AUTH_SECRET", "NOTES_SECRET")
+                    .forEach { secret ->
+                        assertFalse(result.contains(secret))
+                        assertFalse(logMessages.joinToString(" ").contains(secret))
+                    }
+                verify(exactly = 1) { comparer.sendToComparer(editedPayload) }
+                verify(exactly = 0) { comparer.sendToComparer(originalPayload) }
+                verify(exactly = 0) { comparer.sendToComparer(otherPayload) }
+                verify(exactly = 1) { selected.editedPayload() }
+                verify(exactly = 0) { selected.payload() }
+                verify(exactly = 0) { other.editedPayload() }
+                verify(exactly = 0) { other.payload() }
+                verify(exactly = 0) { selected.annotations() }
+                verify(exactly = 0) { selected.upgradeRequest() }
+                verify { editedPayload wasNot Called }
+                verify { originalPayload wasNot Called }
+                verify(exactly = 0) { api.http() }
+                verify(exactly = 0) { api.websockets() }
+                verify(exactly = 0) { api.repeater() }
+                verify(exactly = 0) { api.intruder() }
+                verify(exactly = 0) { api.organizer() }
+                verify(exactly = 0) { proxy.enableIntercept() }
+                verify(exactly = 0) { proxy.disableIntercept() }
+            }
+        }
+
+        @Test
+        fun `WebSocket Comparer uses original payload when edited payload is null`() {
+            val proxy = mockk<Proxy>()
+            val comparer = mockk<Comparer>(relaxed = true)
+            val logging = mockk<Logging>(relaxed = true)
+            val logMessages = mutableListOf<String>()
+            val originalPayload = byteArrayMock("ORIGINAL_FALLBACK_SECRET")
+            val message = comparerWebSocketMessage(33, originalPayload)
+            every { api.proxy() } returns proxy
+            every { proxy.webSocketHistory() } returns listOf(message)
+            every { api.comparer() } returns comparer
+            every { api.logging() } returns logging
+            every { logging.logToOutput(capture(logMessages)) } just runs
+
+            runBlocking {
+                val result = client.callTool("send_proxy_websocket_history_item_to_comparer", mapOf(
+                    "messageId" to 33
+                )).expectTextContent()
+                assertEquals("Sent the original payload from Proxy WebSocket history item 33 to Comparer. No message was transmitted.", result)
+                assertFalse(result.contains("ORIGINAL_FALLBACK_SECRET"))
+                assertFalse(logMessages.joinToString(" ").contains("ORIGINAL_FALLBACK_SECRET"))
+                verify(exactly = 1) { comparer.sendToComparer(originalPayload) }
+                verify(exactly = 1) { message.editedPayload() }
+                verify(exactly = 1) { message.payload() }
+                verify { originalPayload wasNot Called }
+                verify(exactly = 0) { api.http() }
+                verify(exactly = 0) { api.websockets() }
+            }
+        }
+
+        @Test
+        fun `WebSocket Comparer preserves nonnull empty edited payload and repeated IDs select separate messages`() {
+            val proxy = mockk<Proxy>()
+            val comparer = mockk<Comparer>(relaxed = true)
+            val firstOriginal = byteArrayMock("FIRST_ORIGINAL_SECRET")
+            val emptyEdited = byteArrayMock("")
+            val secondOriginal = byteArrayMock("SECOND_ORIGINAL_SECRET")
+            val first = comparerWebSocketMessage(40, firstOriginal, emptyEdited)
+            val second = comparerWebSocketMessage(41, secondOriginal)
+            every { api.proxy() } returns proxy
+            every { proxy.webSocketHistory() } returns listOf(first, second)
+            every { api.comparer() } returns comparer
+
+            runBlocking {
+                val firstResult = client.callTool("send_proxy_websocket_history_item_to_comparer", mapOf(
+                    "messageId" to 40
+                )).expectTextContent()
+                val secondResult = client.callTool("send_proxy_websocket_history_item_to_comparer", mapOf(
+                    "messageId" to 41
+                )).expectTextContent()
+
+                assertTrue(firstResult.contains("edited payload"), firstResult)
+                assertTrue(secondResult.contains("original payload"), secondResult)
+                verify(exactly = 1) { comparer.sendToComparer(emptyEdited) }
+                verify(exactly = 1) { comparer.sendToComparer(secondOriginal) }
+                verify(exactly = 0) { comparer.sendToComparer(firstOriginal) }
+                verify(exactly = 0) { first.payload() }
+                verify(exactly = 1) { second.payload() }
+                verify(exactly = 0) { api.http() }
+                verify(exactly = 0) { api.websockets() }
+            }
+        }
+
+        @Test
+        fun `WebSocket Comparer unknown ID does not send another payload and connection remains usable`() {
+            val proxy = mockk<Proxy>()
+            val comparer = mockk<Comparer>(relaxed = true)
+            val neighborPayload = byteArrayMock("NEIGHBOR_SECRET")
+            val neighbor = comparerWebSocketMessage(50, neighborPayload)
+            every { api.proxy() } returns proxy
+            every { proxy.webSocketHistory() } returns listOf(neighbor)
+            every { api.comparer() } returns comparer
+
+            runBlocking {
+                assertEquals("No Proxy WebSocket history item found with ID 500", client.callTool(
+                    "send_proxy_websocket_history_item_to_comparer", mapOf("messageId" to 500)
+                ).expectTextContent())
+                verify(exactly = 0) { neighbor.editedPayload() }
+                verify(exactly = 0) { neighbor.payload() }
+                verify(exactly = 0) { api.comparer() }
+                assertNotNull(client.ping())
+            }
+        }
+
+        @Test
+        fun `WebSocket Comparer denial prevents history payload and Comparer access`() {
+            val previousHandler = DataAccessSecurity.approvalHandler
+            val denyingHandler = mockk<DataAccessApprovalHandler>()
+            val message = comparerWebSocketMessage(60, byteArrayMock("DENIED_SECRET"))
+            DataAccessSecurity.approvalHandler = denyingHandler
+            dataAccessApprovalRequired = true
+            coEvery { denyingHandler.requestDataAccess(DataAccessType.WEBSOCKET_HISTORY, config) } returns false
+            try {
+                runBlocking {
+                    assertEquals("WebSocket history access denied by Burp Suite", client.callTool(
+                        "send_proxy_websocket_history_item_to_comparer", mapOf("messageId" to 60)
+                    ).expectTextContent())
+                    verify(exactly = 0) { api.proxy() }
+                    verify(exactly = 0) { api.comparer() }
+                    verify(exactly = 0) { message.id() }
+                    verify(exactly = 0) { message.editedPayload() }
+                    verify(exactly = 0) { message.payload() }
+                    assertNotNull(client.ping())
+                }
+            } finally {
+                dataAccessApprovalRequired = false
+                DataAccessSecurity.approvalHandler = previousHandler
             }
         }
 

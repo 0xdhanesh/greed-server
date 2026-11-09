@@ -206,3 +206,19 @@ need_to_implement: sending request in repeater, adding markers in intruder opera
 | --------------------- | ---------------------------- |
 | ![Claude WebSocket history validation](./assets/31_10_26_get_proxy_websocket_history_item.png) | ![WebSocket history item verified in Burp](./assets/31_10_26_get_proxy_websocket_history_item1.png) |
 
+**feat(tools): send Proxy WebSocket history payloads to Comparer**
+
+- A Proxy WebSocket history payload can be sent to Burp Comparer using its official Montoya message ID.
+- WebSocket-history access approval is required before a message is read or transferred.
+- The edited payload is preferred when an edited payload exists.
+- The original payload is used when no edited payload is available.
+- Payload bytes are transferred directly to Comparer through the official Montoya `ByteArray` API without text conversion, Base64 encoding or reconstruction.
+- Unknown message IDs return a clear error without adding an item to Comparer.
+- Permission denial prevents the payload from being added to Comparer.
+- Each successful invocation adds the selected payload to Comparer.
+- Tool results and logs do not expose payload contents, upgrade requests, cookies, tokens or authorization data.
+- Sending a payload to Comparer does not transmit an HTTP request or WebSocket message.
+- Sending a payload to Comparer does not create a WebSocket connection.
+- The source WebSocket history message, notes and highlight remain unchanged.
+- Proxy history, Repeater, Intruder and Organizer remain unchanged.
+- The tool does not perform a comparison automatically; it only adds the selected payload to Comparer.

@@ -17,6 +17,7 @@ import burp.api.montoya.http.message.params.ParsedHttpParameter
 import burp.api.montoya.intruder.HttpRequestTemplate
 import burp.api.montoya.organizer.OrganizerItem
 import burp.api.montoya.proxy.ProxyHttpRequestResponse
+import burp.api.montoya.proxy.ProxyWebSocketMessage
 import io.modelcontextprotocol.kotlin.sdk.server.Server
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
@@ -47,6 +48,9 @@ private suspend fun checkDataAccessOrDeny(
 
 private fun findProxyHistoryItem(api: MontoyaApi, historyId: Int): ProxyHttpRequestResponse? =
     api.proxy().history().firstOrNull { it.id() == historyId }
+
+private fun findProxyWebSocketHistoryItem(api: MontoyaApi, messageId: Int): ProxyWebSocketMessage? =
+    api.proxy().webSocketHistory().firstOrNull { it.id() == messageId }
 
 private fun findOrganizerItem(api: MontoyaApi, organizerId: Int): OrganizerItem? =
     api.organizer().items().firstOrNull { it.id() == organizerId }
@@ -738,9 +742,30 @@ fun Server.registerTools(api: MontoyaApi, config: McpConfig) {
             return@mcpTool "WebSocket history access denied by Burp Suite"
         }
 
-        val item = api.proxy().webSocketHistory().firstOrNull { it.id() == messageId }
+        val item = findProxyWebSocketHistoryItem(api, messageId)
             ?: return@mcpTool "No Proxy WebSocket history item found with ID $messageId"
         encodeHistoryItem(item.toSerializableForm())
+    }
+
+    mcpTool<SendProxyWebsocketHistoryItemToComparer>(
+        "Sends the Proxy WebSocket history payload for the official messageId to Burp Comparer. Prefers editedPayload() when present, otherwise uses payload(). For example, ‘Send WebSocket message 3 to Comparer’ uses messageId 3; no payload details are needed. Call this tool for two message IDs to populate Comparer with both payloads. Payload contents are never returned, and no WebSocket message is transmitted."
+    ) {
+        val allowed = checkDataAccessOrDeny(DataAccessType.WEBSOCKET_HISTORY, config, api, "WebSocket history")
+        if (!allowed) {
+            return@mcpTool "WebSocket history access denied by Burp Suite"
+        }
+
+        val item = findProxyWebSocketHistoryItem(api, messageId)
+            ?: return@mcpTool "No Proxy WebSocket history item found with ID $messageId"
+        val editedPayload = item.editedPayload()
+        val payload = editedPayload ?: item.payload()
+            ?: return@mcpTool "Proxy WebSocket history item $messageId has no payload to send to Comparer"
+        val payloadSource = if (editedPayload != null) "edited" else "original"
+
+        api.comparer().sendToComparer(payload)
+        api.logging().logToOutput("Sent $payloadSource payload from Proxy WebSocket history item $messageId to Comparer; no message transmitted")
+
+        "Sent the $payloadSource payload from Proxy WebSocket history item $messageId to Comparer. No message was transmitted."
     }
 
     mcpTool<SetTaskExecutionEngineState>("Sets the state of Burp's task execution engine (paused or unpaused)") {
@@ -986,6 +1011,9 @@ data class GetProxyWebsocketHistorySummary(
 
 @Serializable
 data class GetProxyWebsocketHistoryItem(val messageId: Int)
+
+@Serializable
+data class SendProxyWebsocketHistoryItemToComparer(val messageId: Int)
 
 @Serializable
 data class ProxyWebsocketHistorySummary(
